@@ -41,3 +41,5 @@ aws.json
 .DS_Store
 *.log
 **/.cli/
+tfplan
+*.tfplan
