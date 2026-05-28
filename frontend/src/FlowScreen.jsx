@@ -1,35 +1,23 @@
-import { useState, useEffect, useRef } from 'react'
+import { useAgent } from './AgentContext'
 
 const NODES = [
-  { id: 'voice',    x: 290, y: 30,  w: 180, h: 50, label: 'Voz del paciente', svc: '', type: 'io' },
-  { id: 'stt',      x: 275, y: 120, w: 210, h: 60, label: 'Transcribir', svc: 'Amazon Transcribe', type: 'proc' },
-  { id: 'identify', x: 275, y: 212, w: 210, h: 60, label: 'Identificar paciente', svc: 'Amazon Connect', type: 'proc' },
-  { id: 'bedrock',  x: 305, y: 304, w: 150, h: 90, label: 'Bedrock', svc: 'razona', type: 'decision' },
-  { id: 'appt',     x: 55,  y: 426, w: 215, h: 60, label: 'Buscar turno', svc: 'AWS Lambda · DynamoDB', type: 'tool' },
-  { id: 'history',  x: 490, y: 426, w: 215, h: 60, label: 'Revisar historial', svc: 'AWS Lambda · DynamoDB', type: 'tool' },
-  { id: 'respond',  x: 290, y: 530, w: 180, h: 50, label: 'Responder con voz', svc: 'Amazon Polly', type: 'io' },
+  { id: 'voz',         x: 290, y: 30,  w: 180, h: 50, label: 'Voz del cliente',    svc: '',                  hint: 'próximamente · etapa Connect', type: 'io',   disabled: true },
+  { id: 'transcribir', x: 275, y: 120, w: 210, h: 60, label: 'Transcribir',         svc: 'Amazon Transcribe', hint: 'próximamente · etapa Connect', type: 'proc', disabled: true },
+  { id: 'identificar', x: 275, y: 212, w: 210, h: 60, label: 'Identificar cliente', svc: 'Lambda · DynamoDB',                                       type: 'proc' },
+  { id: 'bedrock',     x: 305, y: 304, w: 150, h: 90, label: 'Bedrock',             svc: 'razona',                                                  type: 'decision' },
+  { id: 'perfil',      x: 55,  y: 426, w: 215, h: 60, label: 'Consultar perfil',    svc: 'Lambda · DynamoDB',                                       type: 'tool' },
+  { id: 'evaluar',     x: 490, y: 426, w: 215, h: 60, label: 'Evaluar préstamo',    svc: 'Lambda · DynamoDB',                                       type: 'tool' },
+  { id: 'responder',   x: 290, y: 530, w: 180, h: 50, label: 'Responder con voz',   svc: 'Amazon Polly',      hint: 'próximamente · etapa Connect', type: 'io',   disabled: true },
 ]
 
 const EDGES = [
-  { from: 'voice', to: 'stt' },
-  { from: 'stt', to: 'identify' },
-  { from: 'identify', to: 'bedrock' },
-  { from: 'bedrock', to: 'appt' },
-  { from: 'bedrock', to: 'history' },
-  { from: 'appt', to: 'respond' },
-  { from: 'history', to: 'respond' },
-]
-
-const SEQUENCE = [
-  { node: 'voice',    label: 'Martín habla — entra el audio', ms: 1800 },
-  { node: 'stt',      label: 'Transcribiendo la voz a texto', ms: 1800 },
-  { node: 'identify', label: 'Paciente identificado: Martín', ms: 1800 },
-  { node: 'bedrock',  label: 'Bedrock interpreta la intención', ms: 2000 },
-  { node: 'appt',     label: 'Consultando la agenda del Dr. Ramírez', ms: 2200 },
-  { node: 'respond',  label: 'Vera ofrece alternativas de turno', ms: 2000 },
-  { node: 'bedrock',  label: 'Bedrock evalúa proactivamente el historial', ms: 2000 },
-  { node: 'history',  label: 'Encuentra el recordatorio de cardiología', ms: 2200 },
-  { node: 'respond',  label: 'Vera sugiere agendar con cardiología', ms: 2200 },
+  { from: 'voz',         to: 'transcribir' },
+  { from: 'transcribir', to: 'identificar' },
+  { from: 'identificar', to: 'bedrock' },
+  { from: 'bedrock',     to: 'perfil' },
+  { from: 'bedrock',     to: 'evaluar' },
+  { from: 'perfil',      to: 'responder' },
+  { from: 'evaluar',     to: 'responder' },
 ]
 
 const TYPE_COLORS = {
@@ -37,6 +25,12 @@ const TYPE_COLORS = {
   proc:     { fill: '#0d2138', stroke: '#2f7fd4', text: '#cfe4f8', svc: '#6b9fd0', glow: '#2f7fd4' },
   decision: { fill: '#241430', stroke: '#b14fd6', text: '#ecc9f7', svc: '#bb86d8', glow: '#b14fd6' },
   tool:     { fill: '#33240a', stroke: '#e0a020', text: '#f7e0a8', svc: '#c9a456', glow: '#e0a020' },
+}
+
+const TOOL_BY_NODE = {
+  identificar: 'identificar_cliente',
+  perfil:      'consultar_perfil_crediticio',
+  evaluar:     'evaluar_prestamo',
 }
 
 function nodeCenter(n) { return { cx: n.x + n.w / 2, cy: n.y + n.h / 2 } }
@@ -47,46 +41,58 @@ function edgePath(a, b) {
   return `M ${A.cx} ${startY} C ${A.cx} ${midY}, ${B.cx} ${midY}, ${B.cx} ${endY}`
 }
 
-export default function FlowScreen({ go }) {
-  const [activeIdx, setActiveIdx] = useState(-1)
-  const [playing, setPlaying] = useState(false)
-  const [reached, setReached] = useState(new Set())
-  const timer = useRef(null)
+function statusOf(nodeId, toolCalls, isRunning) {
+  const node = NODES.find((n) => n.id === nodeId)
+  if (node?.disabled) return 'disabled'
+  if (nodeId === 'bedrock') {
+    if (isRunning || toolCalls.some((tc) => tc.status === 'running')) return 'running'
+    if (toolCalls.length > 0) return 'done'
+    return 'idle'
+  }
+  const toolName = TOOL_BY_NODE[nodeId]
+  if (!toolName) return 'idle'
+  const matches = toolCalls.filter((tc) => tc.name === toolName)
+  if (matches.length === 0) return 'idle'
+  return matches[matches.length - 1].status === 'done' ? 'done' : 'running'
+}
 
-  useEffect(() => {
-    if (!playing) return
-    if (activeIdx >= SEQUENCE.length - 1) { setPlaying(false); return }
-    const next = activeIdx + 1
-    timer.current = setTimeout(() => {
-      setActiveIdx(next)
-      setReached((prev) => new Set(prev).add(SEQUENCE[next].node))
-    }, activeIdx < 0 ? 500 : SEQUENCE[activeIdx].ms)
-    return () => clearTimeout(timer.current)
-  }, [playing, activeIdx])
+function dataOf(nodeId, toolCalls) {
+  const toolName = TOOL_BY_NODE[nodeId]
+  if (!toolName) return null
+  const matches = toolCalls.filter((tc) => tc.name === toolName && tc.status === 'done')
+  const latest = matches[matches.length - 1]
+  if (!latest?.result) return null
+  const r = latest.result
+  if (nodeId === 'identificar' && r.identificado) {
+    return { text: `${r.nombre} ✓`, color: '#a6f5cd' }
+  }
+  if (nodeId === 'evaluar' && r.decision) {
+    const dti = r.dti_resultante_pct
+    if (r.decision === 'aprobado') return { text: `Aprobado · DTI ${dti}%`, color: '#27d07a' }
+    return { text: `Derivado · DTI ${dti}%`, color: '#e0a020' }
+  }
+  return null
+}
 
-  function start() { setActiveIdx(-1); setReached(new Set()); setPlaying(true) }
-  function reset() { clearTimeout(timer.current); setPlaying(false); setActiveIdx(-1); setReached(new Set()) }
-
-  const activeNode = activeIdx >= 0 ? SEQUENCE[activeIdx].node : null
+export default function FlowScreen({ go, monitorMode }) {
+  const { toolCalls, isRunning, conversationState, reset } = useAgent()
   const nodeById = (id) => NODES.find((n) => n.id === id)
 
-  function edgeActive(e) {
-    if (activeIdx < 0) return false
-    const cur = SEQUENCE[activeIdx].node
-    const prev = activeIdx > 0 ? SEQUENCE[activeIdx - 1].node : null
-    return (e.from === prev && e.to === cur)
-  }
-  function edgeLit(e) { return reached.has(e.from) && reached.has(e.to) }
+  const headerStatus = isRunning
+    ? 'Bedrock está razonando…'
+    : conversationState === 'escalated' ? 'Caso derivado a un asesor humano'
+    : conversationState === 'resolved'  ? 'Caso resuelto por Vera'
+    : 'lo que pasa por detrás mientras Vera atiende'
 
   return (
     <div className="min-h-screen flex flex-col bg-[#0a0e15]">
       <header className="flex items-center gap-4 px-8 py-6 border-b border-slate-800 z-10">
-        <button onClick={() => go('home')} className="text-slate-400 hover:text-white transition-colors">← volver</button>
+        {!monitorMode && (
+          <button onClick={() => go('home')} className="text-slate-400 hover:text-white transition-colors">← volver</button>
+        )}
         <span className="text-sm font-mono text-violet-400">02</span>
         <span className="text-lg font-medium">Orquestación en vivo</span>
-        <span className="ml-auto text-sm text-slate-500">
-          {activeIdx >= 0 ? SEQUENCE[activeIdx].label : 'lo que pasa por detrás mientras Vera atiende'}
-        </span>
+        <span className="ml-auto text-sm text-slate-500">{headerStatus}</span>
       </header>
 
       <div className="flex-1 flex items-center justify-center p-4 relative overflow-hidden">
@@ -109,7 +115,9 @@ export default function FlowScreen({ go }) {
 
           {EDGES.map((e, i) => {
             const a = nodeById(e.from), b = nodeById(e.to)
-            const lit = edgeLit(e), flowing = edgeActive(e)
+            const target = statusOf(e.to, toolCalls, isRunning)
+            const flowing = target === 'running'
+            const lit = target === 'done'
             const d = edgePath(a, b)
             return (
               <g key={i}>
@@ -129,9 +137,12 @@ export default function FlowScreen({ go }) {
 
           {NODES.map((n) => {
             const c = TYPE_COLORS[n.type]
-            const isActive = activeNode === n.id
-            const isReached = reached.has(n.id)
-            const opacity = isReached || isActive ? 1 : 0.28
+            const status = statusOf(n.id, toolCalls, isRunning)
+            const data = dataOf(n.id, toolCalls)
+            const isActive = status === 'running'
+            const isReached = status === 'done'
+            const isDisabled = status === 'disabled'
+            const opacity = isDisabled ? 0.35 : (isReached || isActive ? 1 : 0.28)
             const { cx, cy } = nodeCenter(n)
             const lift = isActive ? -3 : 0
 
@@ -155,9 +166,17 @@ export default function FlowScreen({ go }) {
             )
 
             return (
-              <g key={n.id} filter={isActive ? `url(#glow-${n.type})` : undefined}
-                style={{ opacity, transition: 'opacity 0.5s, transform 0.4s', transform: `translateY(${lift}px)` }}>
-                {inner}
+              <g key={n.id}>
+                <g filter={isActive ? `url(#glow-${n.type})` : undefined}
+                  style={{ opacity, transition: 'opacity 0.5s, transform 0.4s', transform: `translateY(${lift}px)` }}>
+                  {inner}
+                </g>
+                {n.hint && (
+                  <text x={cx} y={n.y + n.h + 14} textAnchor="middle" fontSize="9.5" fill="#5a6577" letterSpacing="0.4">{n.hint}</text>
+                )}
+                {data && (
+                  <text x={cx} y={n.y + n.h + 14} textAnchor="middle" fontSize="11" fontWeight="500" fill={data.color} letterSpacing="0.3">{data.text}</text>
+                )}
               </g>
             )
           })}
@@ -165,12 +184,7 @@ export default function FlowScreen({ go }) {
       </div>
 
       <div className="flex justify-center pb-10">
-        {!playing && activeIdx < 0 && (
-          <button onClick={start} className="text-sm px-5 py-2 rounded-full border border-violet-500/50 text-violet-100 bg-violet-500/15 hover:bg-violet-500/25 transition-colors">▶ reproducir orquestación</button>
-        )}
-        {(playing || activeIdx >= 0) && (
-          <button onClick={reset} className="text-sm px-5 py-2 rounded-full border border-slate-700 text-slate-400 hover:text-white transition-colors">↺ reiniciar</button>
-        )}
+        <button onClick={reset} className="text-sm px-5 py-2 rounded-full border border-slate-700 text-slate-400 hover:text-white transition-colors">↺ reiniciar</button>
       </div>
     </div>
   )
