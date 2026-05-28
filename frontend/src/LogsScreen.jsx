@@ -9,7 +9,7 @@ const LEVEL_COLORS = {
   AUTH: 'text-violet-400',
 }
 
-function buildLines(events, toolCalls) {
+function buildLines(events, toolCalls, metrics) {
   const lines = []
   let resultIdx = 0
   for (const ev of events) {
@@ -51,13 +51,21 @@ function buildLines(events, toolCalls) {
         break
     }
   }
+  if (metrics && metrics.totalTokens) {
+    lines.push({
+      ts: lines.length ? lines[lines.length - 1].ts : '',
+      lvl: 'OK',
+      t: 'bedrock.usage',
+      d: `tokens_in=${metrics.inputTokens} tokens_out=${metrics.outputTokens} total=${metrics.totalTokens} latency=${metrics.latencyMs}ms`,
+    })
+  }
   return lines
 }
 
 export default function LogsScreen({ go, monitorMode }) {
-  const { events, toolCalls, reset, isRunning } = useAgent()
+  const { events, toolCalls, metrics, reset, isRunning } = useAgent()
   const scrollRef = useRef(null)
-  const lines = buildLines(events, toolCalls)
+  const lines = buildLines(events, toolCalls, metrics)
 
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight

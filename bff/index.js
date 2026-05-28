@@ -5,6 +5,9 @@ import http from "http";
 
 const PORT = process.env.PORT || 8787;
 const AGENT_URL = process.env.AGENT_URL || "http://localhost:8080/invocations";
+// Derive the metrics endpoint base from the agent URL (strip /invocations)
+const AGENT_BASE = AGENT_URL.replace(/\/invocations\/?$/, "");
+const DEMO_THREAD_ID = "vera-demo";
 
 const app = express();
 app.use(express.json());
@@ -113,6 +116,23 @@ app.post("/chat", async (req, res) => {
     // Save the assistant's full reply into the shared history
     if (assistantText) {
       conversation.push({ id: randomUUID(), role: "assistant", content: assistantText });
+    }
+
+    // Fetch real token usage + latency from the agent and broadcast it
+    try {
+      const metricsRes = await fetch(`${AGENT_BASE}/metrics/${DEMO_THREAD_ID}`);
+      if (metricsRes.ok) {
+        const metrics = await metricsRes.json();
+        broadcast({
+          type: "METRICS",
+          inputTokens: metrics.inputTokens,
+          outputTokens: metrics.outputTokens,
+          totalTokens: metrics.totalTokens,
+          latencyMs: metrics.latencyMs,
+        });
+      }
+    } catch (e) {
+      console.error("[bff] could not fetch metrics:", e);
     }
 
     res.json({ ok: true });

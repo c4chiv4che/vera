@@ -27,6 +27,7 @@ export function AgentProvider({ children }) {
   const [conversationState, setConversationState] = useState("idle");
   const [isRunning, setIsRunning] = useState(false);
   const [connected, setConnected] = useState(false);
+  const [metrics, setMetrics] = useState(null);
 
   const streamingRef = useRef({ id: null, text: "" });
   const wsRef = useRef(null);
@@ -45,6 +46,7 @@ export function AgentProvider({ children }) {
 
       case "RESET":
         setMessages([]);
+        setMetrics(null);
         setVeraStatus("idle");
         setToolCalls([]);
         setEvents([]);
@@ -115,6 +117,16 @@ export function AgentProvider({ children }) {
         logEvent("RUN_FINISHED", `thread=${event.threadId}`);
         break;
 
+      case "METRICS":
+        setMetrics({
+          inputTokens: event.inputTokens,
+          outputTokens: event.outputTokens,
+          totalTokens: event.totalTokens,
+          latencyMs: event.latencyMs,
+        });
+        logEvent("METRICS", `tokens=${event.totalTokens} latency=${event.latencyMs}ms`);
+        break;
+
       case "ERROR":
         setIsRunning(false);
         setVeraStatus("idle");
@@ -176,6 +188,7 @@ export function AgentProvider({ children }) {
   }, []);
 
   const value = {
+    metrics,
     messages, veraStatus, toolCalls, events, conversationState, isRunning, connected,
     sendMessage, reset,
   };

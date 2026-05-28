@@ -142,5 +142,29 @@ config = StrandsAgentConfig(session_manager_provider=session_manager_provider)
 agui_agent = StrandsAgent(agent=agent, name="vera", description="Asistente bancaria por voz", config=config)
 app = create_strands_app(agui_agent, path="/invocations", ping_path="/ping")
 
+
+@app.get("/metrics/{thread_id}")
+def get_metrics(thread_id: str):
+    """Return real token usage and latency for a thread's agent.
+    Reads Strands' EventLoopMetrics from the per-thread agent maintained
+    by the AG-UI adapter. Defensive: if the adapter's internal structure
+    changes, returns zeros instead of erroring."""
+    try:
+        agent_for_thread = agui_agent._agents_by_thread.get(thread_id)
+        if agent_for_thread is None:
+            return {"found": False, "inputTokens": 0, "outputTokens": 0, "totalTokens": 0, "latencyMs": 0}
+        m = agent_for_thread.event_loop_metrics
+        usage = m.accumulated_usage
+        metrics = m.accumulated_metrics
+        return {
+            "found": True,
+            "inputTokens": usage.get("inputTokens", 0),
+            "outputTokens": usage.get("outputTokens", 0),
+            "totalTokens": usage.get("totalTokens", 0),
+            "latencyMs": metrics.get("latencyMs", 0),
+        }
+    except Exception as e:
+        return {"found": False, "error": str(e), "inputTokens": 0, "outputTokens": 0, "totalTokens": 0, "latencyMs": 0}
+
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", "8080")))
