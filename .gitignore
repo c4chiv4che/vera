@@ -1,0 +1,43 @@
+# Dependencies
+node_modules/
+**/node_modules/
+.venv/
+**/.venv/
+__pycache__/
+**/__pycache__/
+
+# Build outputs
+dist/
+**/dist/
+build/
+**/build/
+cdk.out/
+**/cdk.out/
+
+# Secrets & local config — NUNCA commitear
+.env
+.env.local
+**/.env
+**/.env.local
+*.tfvars
+*.tfvars.json
+.terraform/
+**/.terraform/
+terraform.tfstate
+terraform.tfstate.*
+**/terraform.tfstate
+**/terraform.tfstate.*
+
+# AWS / credentials — defensa extra
+**/credentials
+**/*.pem
+aws.json
+
+# CLI noise
+**/.cli/logs/
+**/.cli/traces/
+
+# OS
+.DS_Store
+*.log
+**/.cli/
