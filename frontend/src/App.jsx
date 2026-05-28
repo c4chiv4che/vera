@@ -144,7 +144,25 @@ function Screen({ id, go }) {
   )
 }
 
+// Map ?view= URL param to a dedicated full-screen view (monitor mode)
+const VIEW_COMPONENTS = {
+  user: PatientScreen,
+  flow: FlowScreen,
+  logs: LogsScreen,
+  admin: AdminScreen,
+}
+
 function App() {
+  const params = new URLSearchParams(window.location.search)
+  const view = params.get('view')
+
+  // Monitor mode: a single view, full-screen, no home navigation
+  if (view && VIEW_COMPONENTS[view]) {
+    const ViewComponent = VIEW_COMPONENTS[view]
+    return <ViewComponent go={() => {}} monitorMode />
+  }
+
+  // Default: navigable home (as before)
   const [screen, setScreen] = useState('home')
   if (screen === 'home') return <Home go={setScreen} />
   if (screen === 'patient') return <PatientScreen go={setScreen} />
