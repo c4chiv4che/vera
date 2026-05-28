@@ -1,7 +1,7 @@
-import { createContext, useContext, useRef, useState, useCallback } from "react";
-import { HttpAgent } from "@ag-ui/client";
+import { createContext, useContext, useRef, useState, useEffect, useCallback } from "react";
 
-const AGENT_URL = "http://localhost:8080/invocations";
+const BFF_HTTP = "http://localhost:8787";
+const BFF_WS = "ws://localhost:8787";
 
 const AgentContext = createContext(null);
 
@@ -11,7 +11,6 @@ export function useAgent() {
   return ctx;
 }
 
-// Decode a tool result JSON string safely (handles the \uXXXX escaping)
 function parseResult(content) {
   try {
     return JSON.parse(content);
@@ -21,16 +20,16 @@ function parseResult(content) {
 }
 
 export function AgentProvider({ children }) {
-  const [messages, setMessages] = useState([]);        // {role, content} for screen 1
-  const [veraStatus, setVeraStatus] = useState("idle"); // idle | thinking | speaking
-  const [toolCalls, setToolCalls] = useState([]);       // {id, name, args, result, status}
-  const [events, setEvents] = useState([]);             // raw log lines for screen 3
-  const [conversationState, setConversationState] = useState("idle"); // idle | active | resolved | escalated
+  const [messages, setMessages] = useState([]);
+  const [veraStatus, setVeraStatus] = useState("idle");
+  const [toolCalls, setToolCalls] = useState([]);
+  const [events, setEvents] = useState([]);
+  const [conversationState, setConversationState] = useState("idle");
   const [isRunning, setIsRunning] = useState(false);
+  const [connected, setConnected] = useState(false);
 
-  const agentRef = useRef(null);
-  // Track the streaming assistant message id -> accumulated text
   const streamingRef = useRef({ id: null, text: "" });
+  const wsRef = useRef(null);
 
   const logEvent = useCallback((type, detail) => {
     const ts = new Date().toLocaleTimeString("es-AR", { hour12: false });
@@ -39,6 +38,21 @@ export function AgentProvider({ children }) {
 
   const handleEvent = useCallback((event) => {
     switch (event.type) {
+      case "USER_MESSAGE":
+        // The BFF owns the conversation; it tells us when a user message is registered
+        setMessages((prev) => [...prev, { id: event.message.id, role: "user", content: event.message.content }]);
+        break;
+
+      case "RESET":
+        setMessages([]);
+        setVeraStatus("idle");
+        setToolCalls([]);
+        setEvents([]);
+        setConversationState("idle");
+        setIsRunning(false);
+        streamingRef.current = { id: null, text: "" };
+        break;
+
       case "RUN_STARTED":
         setConversationState("active");
         setIsRunning(true);
@@ -48,7 +62,6 @@ export function AgentProvider({ children }) {
       case "TEXT_MESSAGE_START":
         streamingRef.current = { id: event.messageId, text: "" };
         setVeraStatus("speaking");
-        // add an empty assistant message we'll fill in
         setMessages((prev) => [...prev, { id: event.messageId, role: "assistant", content: "" }]);
         break;
 
@@ -56,9 +69,7 @@ export function AgentProvider({ children }) {
         streamingRef.current.text += event.delta;
         const text = streamingRef.current.text;
         const id = streamingRef.current.id;
-        setMessages((prev) =>
-          prev.map((m) => (m.id === id ? { ...m, content: text } : m))
-        );
+        setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, content: text } : m)));
         break;
       }
 
@@ -88,12 +99,9 @@ export function AgentProvider({ children }) {
       case "TOOL_CALL_RESULT": {
         const parsed = parseResult(event.content);
         setToolCalls((prev) =>
-          prev.map((t) =>
-            t.id === event.toolCallId ? { ...t, result: parsed, status: "done" } : t
-          )
+          prev.map((t) => (t.id === event.toolCallId ? { ...t, result: parsed, status: "done" } : t))
         );
         logEvent("TOOL_CALL_RESULT", event.content?.slice(0, 80));
-        // Detect escalation from the loan evaluation
         if (parsed && parsed.decision && parsed.decision !== "aprobado") {
           setConversationState("escalated");
         }
@@ -107,58 +115,68 @@ export function AgentProvider({ children }) {
         logEvent("RUN_FINISHED", `thread=${event.threadId}`);
         break;
 
+      case "ERROR":
+        setIsRunning(false);
+        setVeraStatus("idle");
+        logEvent("ERROR", event.detail);
+        break;
+
       default:
-        // STATE_SNAPSHOT, MESSAGES_SNAPSHOT, etc. — logged but not acted on for now
         logEvent(event.type, "");
     }
   }, [logEvent]);
 
+  // Connect to the BFF WebSocket on mount
+  useEffect(() => {
+    let ws;
+    let closed = false;
+
+    function connect() {
+      ws = new WebSocket(BFF_WS);
+      wsRef.current = ws;
+      ws.onopen = () => setConnected(true);
+      ws.onclose = () => {
+        setConnected(false);
+        if (!closed) setTimeout(connect, 1500); // simple auto-reconnect
+      };
+      ws.onerror = () => ws.close();
+      ws.onmessage = (msg) => {
+        try {
+          handleEvent(JSON.parse(msg.data));
+        } catch (e) {
+          console.error("[ws] bad message", e);
+        }
+      };
+    }
+
+    connect();
+    return () => { closed = true; if (ws) ws.close(); };
+  }, [handleEvent]);
+
   const sendMessage = useCallback(async (text) => {
     if (!text?.trim() || isRunning) return;
-
-    // Add the user's message to screen 1 immediately
-    setMessages((prev) => [...prev, { id: crypto.randomUUID(), role: "user", content: text }]);
-
-    const agent = new HttpAgent({ url: AGENT_URL });
-    agentRef.current = agent;
-    // Send full history so the agent has context (memory)
-    agent.messages = messages
-      .filter((m) => m.role === "user" || m.role === "assistant")
-      .map((m) => ({ id: m.id, role: m.role, content: m.content }))
-      .concat([{ id: crypto.randomUUID(), role: "user", content: text }]);
-
-    agent.subscribe({
-      onEvent({ event }) {
-        handleEvent(event);
-      },
-      onRunFailed(err) {
-        console.error("[agent] run failed", err);
-        setIsRunning(false);
-        setVeraStatus("idle");
-      },
-    });
-
     try {
-      await agent.runAgent();
+      await fetch(`${BFF_HTTP}/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: text }),
+      });
+      // The user message and all events come back via WebSocket broadcast
     } catch (e) {
-      console.error("[agent] error:", e);
-      setIsRunning(false);
-      setVeraStatus("idle");
+      console.error("[chat] failed to send", e);
     }
-  }, [messages, isRunning, handleEvent]);
+  }, [isRunning]);
 
-  const reset = useCallback(() => {
-    setMessages([]);
-    setVeraStatus("idle");
-    setToolCalls([]);
-    setEvents([]);
-    setConversationState("idle");
-    setIsRunning(false);
-    streamingRef.current = { id: null, text: "" };
+  const reset = useCallback(async () => {
+    try {
+      await fetch(`${BFF_HTTP}/reset`, { method: "POST" });
+    } catch (e) {
+      console.error("[reset] failed", e);
+    }
   }, []);
 
   const value = {
-    messages, veraStatus, toolCalls, events, conversationState, isRunning,
+    messages, veraStatus, toolCalls, events, conversationState, isRunning, connected,
     sendMessage, reset,
   };
 
