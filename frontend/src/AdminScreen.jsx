@@ -1,27 +1,116 @@
-const METRICS = [
-  { label: 'Atendidos hoy', value: 37, icon: 'M3 12h4l3 8 4-16 3 8h4', spark: [12,18,15,22,28,25,31,37], tone: 'normal' },
-  { label: 'Escalados a humano', value: 6, icon: 'M16 11a4 4 0 1 0-8 0M4 21v-2a4 4 0 0 1 4-4h8a4 4 0 0 1 4 4v2', spark: [2,3,3,4,4,5,5,6], tone: 'normal' },
-  { label: 'Tiempo medio', value: '1m 32s', icon: 'M12 7v5l3 2M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z', spark: [110,98,105,92,95,88,90,92], tone: 'normal', raw: true },
-]
+import { useAgent } from './AgentContext'
 
-const RESOLVED = 31
-const TOTAL = 37
-const PCT = Math.round((RESOLVED / TOTAL) * 100)
-
-const CONVERSATIONS = [
-  { initials: 'MR', name: 'Martín R.', task: 'Turno con cardiología agendado', icon: 'M12 21C7 17 3 13 3 8.5A4.5 4.5 0 0 1 12 6a4.5 4.5 0 0 1 9 2.5C21 13 17 17 12 21z', mood: 'tranquilo', status: 'resuelto', tone: 'good' },
-  { initials: 'LF', name: 'Lucía F.', task: 'Consulta de historial clínico', icon: 'M9 12h6M9 16h6M9 8h6M5 3h14v18H5z', mood: 'tranquila', status: 'en curso', tone: 'good' },
-  { initials: 'JP', name: 'Jorge P.', task: 'Nuevo turno · clínica general', icon: 'M8 2v4M16 2v4M3 10h18M5 4h14v16H5z', mood: 'neutral', status: 'en curso', tone: 'neutral' },
-  { initials: 'DA', name: 'Diego A.', task: 'Reprogramar turno · dermatología', icon: 'M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0zM12 7v5l3 2', mood: 'tranquilo', status: 'en curso', tone: 'good' },
-  { initials: 'ES', name: 'Elena S.', task: 'Llamó por resultados de un estudio · pide hablar con una persona', icon: 'M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z', mood: 'angustiada', status: 'intervenir', tone: 'alert' },
-]
-
-const TONE = {
-  good:    { dot: '#34d399', pill: 'bg-emerald-500/15 text-emerald-300', avatar: 'bg-emerald-500/15 text-emerald-300' },
-  neutral: { dot: '#94a3b8', pill: 'bg-slate-500/15 text-slate-300', avatar: 'bg-slate-700/40 text-slate-300' },
-  alert:   { dot: '#f87171', pill: 'bg-red-500/20 text-red-300', avatar: 'bg-red-500/20 text-red-300' },
+const AGENT_STATUS_STYLE = {
+  AVAILABLE:          { label: 'AVAILABLE',          pill: 'bg-emerald-500/15 text-emerald-300', dot: '#34d399' },
+  ON_CONTACT:         { label: 'ON CONTACT',         pill: 'bg-sky-500/15 text-sky-300',         dot: '#38bdf8' },
+  AFTER_CONTACT_WORK: { label: 'AFTER CONTACT WORK', pill: 'bg-amber-500/15 text-amber-300',     dot: '#f59e0b' },
+  NON_PRODUCTIVE:     { label: 'NON PRODUCTIVE',     pill: 'bg-slate-700/40 text-slate-300',     dot: '#94a3b8' },
 }
 
+const CONTACT_STATE_STYLE = {
+  identifying: { label: 'Identificando',      pill: 'bg-sky-500/15 text-sky-300' },
+  consulting:  { label: 'Consultando perfil', pill: 'bg-violet-500/15 text-violet-300' },
+  evaluating:  { label: 'Evaluando préstamo', pill: 'bg-amber-500/15 text-amber-300' },
+  resolved:    { label: 'Resuelto',           pill: 'bg-emerald-500/15 text-emerald-300' },
+  escalated:   { label: 'Derivado',           pill: 'bg-red-500/20 text-red-300' },
+  in_queue:    { label: 'En espera',          pill: 'bg-slate-700/40 text-slate-300' },
+}
+
+const MOOD_DOT = { calm: '#34d399', neutral: '#94a3b8', distressed: '#f87171' }
+
+const MOCK_HUMAN_AGENTS = [
+  { id: 'carolina', name: 'Carolina M.', status: 'ON_CONTACT',         contactId: 'mock-diego' },
+  { id: 'mariano',  name: 'Mariano F.',  status: 'ON_CONTACT',         contactId: 'mock-elena' },
+  { id: 'sofia',    name: 'Sofía R.',    status: 'AFTER_CONTACT_WORK' },
+  { id: 'tomas',    name: 'Tomás L.',    status: 'AVAILABLE' },
+]
+
+const MOCK_CONTACTS = [
+  { id: 'mock-pedro',  customerName: 'Pedro G.',  task: 'Solicitud de tarjeta de crédito',                       state: 'in_queue',   channel: 'VOICE', mood: 'calm',       queueDurationSec: 47, isReal: false },
+  { id: 'mock-roxana', customerName: 'Roxana V.', task: 'Consulta saldo de plazo fijo',                          state: 'in_queue',   channel: 'CHAT',  mood: 'neutral',    queueDurationSec: 23, isReal: false },
+  { id: 'mock-diego',  customerName: 'Diego A.',  task: 'Reprogramar plazo fijo',                                state: 'consulting', channel: 'VOICE', mood: 'calm',       agentId: 'carolina',  isReal: false },
+  { id: 'mock-elena',  customerName: 'Elena S.',  task: 'Pide hablar con un asesor sobre rechazo de préstamo',    state: 'escalated',  channel: 'VOICE', mood: 'distressed', agentId: 'mariano',   isReal: false },
+]
+
+const TOOL_TO_STATE = {
+  identificar_cliente:         'identifying',
+  consultar_perfil_crediticio: 'consulting',
+  evaluar_prestamo:            'evaluating',
+}
+
+// ─── Capa 1 · Adaptador (espejo de Connect GetCurrentMetricData) ─────────────
+function useConnectMetrics() {
+  const { toolCalls, conversationState, isRunning } = useAgent()
+
+  const veraStatus = isRunning
+    ? 'ON_CONTACT'
+    : (conversationState === 'resolved' || conversationState === 'escalated') ? 'AFTER_CONTACT_WORK'
+    : 'AVAILABLE'
+
+  const identDone = toolCalls.find((tc) => tc.name === 'identificar_cliente' && tc.status === 'done')
+  const customerName = identDone?.result?.nombre ?? 'Esperando identificación'
+
+  const runningName = toolCalls.find((tc) => tc.status === 'running')?.name
+  const lastName    = toolCalls[toolCalls.length - 1]?.name
+
+  const realState =
+      conversationState === 'escalated' ? 'escalated'
+    : conversationState === 'resolved'  ? 'resolved'
+    : runningName ? TOOL_TO_STATE[runningName]
+    : toolCalls.length === 0 ? 'in_queue'
+    : TOOL_TO_STATE[lastName] ?? 'in_queue'
+
+  const realContact = {
+    id: 'real-current',
+    customerName,
+    task: customerName === 'Esperando identificación'
+      ? 'Cliente conectado · sin identificar'
+      : 'Asistencia con producto financiero',
+    state: realState,
+    channel: 'VOICE',
+    mood: realState === 'escalated' ? 'distressed' : 'calm',
+    agentId: 'vera',
+    isReal: true,
+    queueDurationSec: 0,
+  }
+
+  const veraAgent = {
+    id: 'vera',
+    name: 'Vera',
+    status: veraStatus,
+    contactId: veraStatus === 'AVAILABLE' ? undefined : 'real-current',
+    isBot: true,
+  }
+
+  const agents = [veraAgent, ...MOCK_HUMAN_AGENTS]
+  const contacts = [realContact, ...MOCK_CONTACTS]
+
+  const inQueueContacts = contacts.filter((c) => c.state === 'in_queue')
+  const metricResults = [{
+    collections: [
+      { metric: { name: 'AGENTS_ONLINE',      unit: 'COUNT' },   value: agents.length },
+      { metric: { name: 'AGENTS_AVAILABLE',   unit: 'COUNT' },   value: agents.filter((a) => a.status === 'AVAILABLE').length },
+      { metric: { name: 'CONTACTS_IN_QUEUE',  unit: 'COUNT' },   value: inQueueContacts.length },
+      { metric: { name: 'OLDEST_CONTACT_AGE', unit: 'SECONDS' }, value: Math.max(0, ...inQueueContacts.map((c) => c.queueDurationSec ?? 0)) },
+    ],
+    dimensions: { channel: 'VOICE' },
+  }]
+
+  return { metricResults, agents, contacts }
+}
+
+function getMetric(metricResults, name) {
+  for (const r of metricResults) for (const c of r.collections) if (c.metric.name === name) return c.value
+  return null
+}
+
+function formatAge(sec) {
+  if (sec < 60) return `${sec}s`
+  const m = Math.floor(sec / 60), s = sec % 60
+  return `${m}m ${s}s`
+}
+
+// ─── Primitivos reutilizables ────────────────────────────────────────────────
 function Sparkline({ data, color }) {
   const w = 90, h = 28
   const min = Math.min(...data), max = Math.max(...data)
@@ -63,7 +152,8 @@ function Icon({ d, className }) {
   )
 }
 
-function Metric({ label, value, icon, spark, raw }) {
+// ─── Capa 2 · UI ─────────────────────────────────────────────────────────────
+function MetricBox({ label, value, icon, spark }) {
   return (
     <div className="rounded-2xl p-5 bg-slate-900/50 border border-slate-800/80" style={{ boxShadow: '0 4px 24px rgba(0,0,0,0.25)' }}>
       <div className="flex items-center justify-between">
@@ -71,77 +161,148 @@ function Metric({ label, value, icon, spark, raw }) {
         <span className="text-slate-500"><Icon d={icon} /></span>
       </div>
       <p className="text-3xl font-semibold mt-1 text-slate-100">{value}</p>
-      <Sparkline data={spark} color="#5eead4" />
+      {spark && <Sparkline data={spark} color="#5eead4" />}
     </div>
   )
 }
 
-function Row({ c }) {
-  const isAlert = c.tone === 'alert'
-  const t = TONE[c.tone]
+function KPIStrip({ metricResults }) {
+  const online = getMetric(metricResults, 'AGENTS_ONLINE')
+  const queue  = getMetric(metricResults, 'CONTACTS_IN_QUEUE')
+  const oldest = getMetric(metricResults, 'OLDEST_CONTACT_AGE')
   return (
-    <div className={`flex items-center gap-4 rounded-2xl px-5 py-4 ${
-      isAlert ? 'bg-red-500/10 border-2 border-red-500/50 animate-[alertpulse_2s_ease-in-out_infinite]' : 'bg-slate-900/40 border border-slate-800'
-    }`} style={!isAlert ? { boxShadow: '0 2px 16px rgba(0,0,0,0.2)' } : {}}>
-      <div className={`w-10 h-10 rounded-full flex items-center justify-center text-sm font-medium shrink-0 ${t.avatar}`}>
-        {c.initials}
+    <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
+      <MetricBox label="Agents online"      value={online}            icon="M16 11a4 4 0 1 0-8 0M4 21v-2a4 4 0 0 1 4-4h8a4 4 0 0 1 4 4v2" spark={[4,5,5,4,5,5,5,5]} />
+      <MetricBox label="Contacts in queue"  value={queue}             icon="M3 6h18M3 12h18M3 18h18"                                       spark={[1,2,2,3,2,2,1,2]} />
+      <MetricBox label="Oldest in queue"    value={formatAge(oldest)} icon="M12 7v5l3 2M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z"              spark={[10,20,30,25,35,40,42,47]} />
+      <div className="rounded-2xl p-5 bg-emerald-500/[0.07] border border-emerald-500/25 flex items-center gap-4" style={{ boxShadow: '0 4px 24px rgba(0,0,0,0.25)' }}>
+        <Ring pct={84} color="#34d399" />
+        <div>
+          <p className="text-sm text-slate-300">Resolved without human</p>
+          <p className="text-xs text-slate-500 mt-1">acumulado del día</p>
+        </div>
       </div>
-      <span className={isAlert ? 'text-red-400 shrink-0' : 'text-slate-500 shrink-0'}><Icon d={c.icon} /></span>
-      <div className="flex-1 min-w-0">
-        <p className="font-medium flex items-center gap-2">{c.name}</p>
-        <p className={`text-sm truncate ${isAlert ? 'text-red-300/80' : 'text-slate-500'}`}>{c.task}</p>
-      </div>
-      <span className={`flex items-center gap-2 text-xs px-3 py-1.5 rounded-full shrink-0 ${t.pill}`}>
-        <span className="w-2 h-2 rounded-full" style={{ background: t.dot }}></span>
-        {c.mood}
-      </span>
-      {isAlert ? (
-        <button className="text-xs px-4 py-2 rounded-full border border-red-500/60 text-red-200 bg-red-500/15 hover:bg-red-500/25 transition-colors shrink-0">
-          intervenir
-        </button>
-      ) : (
-        <span className="text-xs text-slate-500 w-20 text-right shrink-0">{c.status}</span>
-      )}
     </div>
   )
 }
 
-export default function AdminScreen({ go }) {
+function Avatar({ name, isBot }) {
+  const initials = name.split(' ').map((s) => s[0]).slice(0, 2).join('')
+  return (
+    <div className={`w-9 h-9 rounded-full flex items-center justify-center text-xs font-medium shrink-0 ${
+      isBot ? 'bg-violet-500/20 text-violet-200' : 'bg-slate-700/40 text-slate-300'
+    }`}>{initials}</div>
+  )
+}
+
+function AgentList({ agents, contacts }) {
+  const contactById = (id) => contacts.find((c) => c.id === id)
+  return (
+    <div className="rounded-2xl bg-slate-900/40 border border-slate-800 p-4" style={{ boxShadow: '0 2px 16px rgba(0,0,0,0.2)' }}>
+      <div className="flex items-center justify-between mb-3 px-1">
+        <h2 className="text-sm font-medium text-slate-300">Agents</h2>
+        <span className="text-xs text-slate-500">{agents.length} online</span>
+      </div>
+      <div className="flex flex-col gap-2">
+        {agents.map((a) => {
+          const s = AGENT_STATUS_STYLE[a.status]
+          const contact = a.contactId ? contactById(a.contactId) : null
+          return (
+            <div key={a.id} className="flex items-center gap-3 rounded-xl px-3 py-2.5 bg-slate-900/40 border border-slate-800/60">
+              <Avatar name={a.name} isBot={a.isBot} />
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium text-slate-200 flex items-center gap-2">
+                  {a.name}
+                  {a.isBot && <span className="text-[10px] px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-300 border border-violet-500/30">AI</span>}
+                </p>
+                {contact && <p className="text-xs text-slate-500 truncate">→ {contact.customerName}</p>}
+              </div>
+              <span className={`text-[10px] px-2 py-1 rounded-full shrink-0 flex items-center gap-1.5 ${s.pill}`}>
+                <span className="w-1.5 h-1.5 rounded-full" style={{ background: s.dot }}></span>
+                {s.label}
+              </span>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function ChannelIcon({ channel }) {
+  const d = channel === 'CHAT'
+    ? 'M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z'
+    : 'M22 16.92v3a2 2 0 0 1-2.18 2 19.86 19.86 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.86 19.86 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z'
+  return <Icon d={d} className="text-slate-500" />
+}
+
+function ContactList({ contacts }) {
+  return (
+    <div className="rounded-2xl bg-slate-900/40 border border-slate-800 p-4" style={{ boxShadow: '0 2px 16px rgba(0,0,0,0.2)' }}>
+      <div className="flex items-center justify-between mb-3 px-1">
+        <h2 className="text-sm font-medium text-slate-300">Contacts</h2>
+        <span className="flex items-center gap-2 text-xs text-slate-500">
+          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>en vivo
+        </span>
+      </div>
+      <div className="flex flex-col gap-2">
+        {contacts.map((c) => {
+          const s = CONTACT_STATE_STYLE[c.state]
+          const isAlert = c.mood === 'distressed'
+          const base = isAlert
+            ? 'bg-red-500/10 border-2 border-red-500/50 animate-[alertpulse_2s_ease-in-out_infinite]'
+            : c.isReal
+              ? 'bg-slate-900/40 border border-cyan-500/40'
+              : 'bg-slate-900/40 border border-slate-800/60'
+          return (
+            <div key={c.id} className={`flex items-center gap-3 rounded-xl px-3 py-3 ${base}`}>
+              <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: MOOD_DOT[c.mood] }}></span>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium text-slate-200 flex items-center gap-2">
+                  {c.customerName}
+                  {c.isReal && <span className="text-[10px] px-1.5 py-0.5 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">live</span>}
+                </p>
+                <p className={`text-xs truncate ${isAlert ? 'text-red-300/80' : 'text-slate-500'}`}>{c.task}</p>
+              </div>
+              <ChannelIcon channel={c.channel} />
+              <span className={`text-[10px] px-2 py-1 rounded-full shrink-0 ${s.pill}`}>{s.label}</span>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+// ─── Capa 3 · Pantalla ───────────────────────────────────────────────────────
+export default function AdminScreen({ go, monitorMode }) {
+  const { reset } = useAgent()
+  const { metricResults, agents, contacts } = useConnectMetrics()
+
   return (
     <div className="min-h-screen flex flex-col bg-[#0a0e15]">
       <header className="flex items-center gap-4 px-8 py-6 border-b border-slate-800">
-        <button onClick={() => go('home')} className="text-slate-400 hover:text-white transition-colors">← volver</button>
+        {!monitorMode && (
+          <button onClick={() => go('home')} className="text-slate-400 hover:text-white transition-colors">← volver</button>
+        )}
         <span className="text-sm font-mono text-amber-400">04</span>
-        <span className="text-lg font-medium">Panel de control</span>
-        <span className="ml-auto text-sm text-slate-500">5 conversaciones activas</span>
+        <span className="text-lg font-medium">Connect · vera-fsi instance</span>
+        <span className="text-xs text-slate-500 font-mono">region us-east-1</span>
+        <span className="ml-auto flex items-center gap-2 text-xs text-slate-400">
+          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>conectado
+        </span>
       </header>
 
       <div className="flex-1 overflow-y-auto px-8 py-8">
-        <div className="max-w-4xl mx-auto">
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
-            <div className="rounded-2xl p-5 bg-emerald-500/[0.07] border border-emerald-500/25 flex items-center gap-4" style={{ boxShadow: '0 4px 24px rgba(0,0,0,0.25)' }}>
-              <Ring pct={PCT} color="#34d399" />
-              <div>
-                <p className="text-sm text-slate-300">Resueltos sin humano</p>
-                <p className="text-xs text-slate-500 mt-1">{RESOLVED} de {TOTAL} hoy</p>
-              </div>
-            </div>
-            {METRICS.map((m) => <Metric key={m.label} {...m} />)}
+        <div className="max-w-6xl mx-auto">
+          <KPIStrip metricResults={metricResults} />
+          <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
+            <div className="lg:col-span-2"><AgentList agents={agents} contacts={contacts} /></div>
+            <div className="lg:col-span-3"><ContactList contacts={contacts} /></div>
           </div>
-
-          <div className="flex items-center justify-between mb-3">
-            <h2 className="text-base font-medium text-slate-300">Conversaciones en curso</h2>
-            <span className="flex items-center gap-2 text-xs text-slate-500">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>en vivo
-            </span>
+          <div className="flex justify-center mt-8">
+            <button onClick={reset} className="text-sm px-5 py-2 rounded-full border border-slate-700 text-slate-400 hover:text-white transition-colors">↺ reiniciar sesión</button>
           </div>
-          <div className="flex flex-col gap-3">
-            {CONVERSATIONS.map((c) => <Row key={c.initials} c={c} />)}
-          </div>
-
-          <p className="text-center text-xs text-slate-600 mt-8">
-            Vera deriva a un humano cuando detecta angustia o un caso que excede su alcance.
-          </p>
         </div>
       </div>
     </div>
