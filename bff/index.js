@@ -24,9 +24,28 @@ app.use((req, res, next) => {
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
-// Track connected monitors
+// Track connected monitors (frontend views subscribing to events).
+// Producers (e.g. the bidi voice server) connect with ?role=producer or path /agent-events
+// and stream events INTO the broadcaster; they are not in the monitor set.
 const clients = new Set();
-wss.on("connection", (ws) => {
+wss.on("connection", (ws, req) => {
+  const isProducer = req.url && (req.url.startsWith("/agent-events") || req.url.includes("role=producer"));
+
+  if (isProducer) {
+    console.log(`[bff] producer connected from ${req.socket.remoteAddress}`);
+    ws.on("message", (data) => {
+      // Producer streams pre-formed AGUI events as JSON text; rebroadcast verbatim.
+      try {
+        const event = JSON.parse(data.toString());
+        broadcast(event);
+      } catch (e) {
+        console.error("[bff] producer sent non-JSON message:", e.message);
+      }
+    });
+    ws.on("close", () => console.log("[bff] producer disconnected"));
+    return;
+  }
+
   clients.add(ws);
   console.log(`[bff] monitor connected (${clients.size} total)`);
   ws.on("close", () => {
