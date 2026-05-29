@@ -123,7 +123,7 @@ The other three frontend views (flow, logs, admin) continue to react to the live
 - **B4.** Re-integrate the other three views (flow, logs, admin) to the new event stream. BFF question gets answered here.
 - **B5.** Add Connect on top so a real phone call can reach the same agent. Add-on once B1–B4 work.
 
-**Status.** Active. B1 begins next. All Phase B work happens on the `phase-b/nova-sonic` branch; `main` stays at the verified end of Phase A until Phase B is verified and ready to merge.
+**Status.** Active. The original plan was to keep all Phase B work on a long-lived `phase-b/nova-sonic` branch and merge to `main` only when Phase B was fully verified. In practice we merged each B1 sub-stage (B1.a, B1.b) to `main` as it completed, using short-lived feature branches. The change happened because B1 was more exploratory than expected and the long-lived branch created friction without protecting `main` from anything meaningful. The decision to merge incrementally is now the working pattern for Phase B.
 
 
 ## 2026-05 — B1.b: real CRM tools wired into the voice agent, with prompt-engineered guardrails for identity verification
