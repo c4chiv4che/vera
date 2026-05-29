@@ -1,15 +1,28 @@
 """
-B1.a — Strands BidiAgent + Nova Sonic via WebSocket.
+B1.b iteración 3 — Strands BidiAgent + Nova Sonic via WebSocket, with
+real CRM tools, hardened prompt for voice, and a privacy-preserving
+identity mismatch handling.
 
-Implements BidiInput and BidiOutput protocols for WebSocket transport
-instead of local PyAudio. Same shape as Strands' own _BidiAudioInput,
-just reads from / writes to a WebSocket instead of the local audio
-devices.
+Changes vs iter 2:
+  Privacy fix: when identificar_cliente returns a name that does not
+  match what the customer said, do NOT reveal whose name the DNI
+  belongs to. Just say identity cannot be verified and ask the
+  customer to retry. The previous wording leaked the real client's
+  full name when probed about a mismatched DNI — a privacy issue
+  for a banking demo.
+
+Changes vs iter 1:
+  1. DNI confirmation step (repeat dictated DNI before calling tool).
+  2. Identity cross-check (verify tool-returned name vs stated name).
+  3. No assumption of loan intent at greeting.
+
+Tool calls and tool results are still logged for measurement.
 """
 import asyncio
 import base64
 import json
 import logging
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -20,14 +33,21 @@ import uvicorn
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
-from strands.experimental.bidi.agent import BidiAgent
-from strands.experimental.bidi.models import BidiNovaSonicModel
-from strands.experimental.bidi.types.events import (
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from main import (  # noqa: E402
+    identificar_cliente,
+    consultar_perfil_crediticio,
+    evaluar_prestamo,
+)
+from strands.experimental.bidi.agent import BidiAgent  # noqa: E402
+from strands.experimental.bidi.models import BidiNovaSonicModel  # noqa: E402
+from strands.experimental.bidi.types.events import (  # noqa: E402
     BidiAudioInputEvent,
     BidiAudioStreamEvent,
     BidiInterruptionEvent,
 )
-from strands.experimental.bidi.types.io import BidiInput, BidiOutput
+from strands.experimental.bidi.types.io import BidiInput, BidiOutput  # noqa: E402
 
 if TYPE_CHECKING:
     from strands.experimental.bidi.types.events import BidiOutputEvent
@@ -36,15 +56,71 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("bidi-server")
 
 
-SYSTEM_PROMPT = """Sos Vera, asistente bancaria por voz, hablás en español rioplatense
-(usás "vos"). Respondés breve y natural, como en una llamada por teléfono.
-Por ahora estás en modo de prueba: no tenés acceso al CRM todavía. Si el cliente
-te pide algo concreto, decile amablemente que el sistema todavía no está conectado."""
+SYSTEM_PROMPT = """Sos Vera, asistente bancaria por voz. Atendés llamadas de
+clientes que se contactan con el banco por distintos motivos.
+
+Hablás en español rioplatense (vos, no tú). Tus respuestas son BREVES,
+como en una llamada telefónica real: una o dos frases por turno. No
+enumerás opciones, no hacés listas. Hablás, no leés.
+
+CÓMO ATENDER UNA LLAMADA:
+
+Al inicio: saludá y preguntá en qué podés ayudar. NO asumas que el
+cliente llama por un préstamo. Esperá a que te diga qué necesita.
+
+IDENTIFICACIÓN DEL CLIENTE (regla crítica):
+
+Cuando el cliente te dé su DNI hablado, ANTES de llamar a
+identificar_cliente, REPETÍ el DNI en voz alta dígito por dígito y
+pedile que te confirme si está bien escuchado. Por ejemplo: "Para
+confirmar, tu DNI es tres uno dos tres cuatro cinco seis siete, ¿es
+correcto?".
+
+Solo después de la confirmación del cliente, llamá a
+identificar_cliente con el DNI.
+
+PRIVACIDAD — REGLA INVIOLABLE:
+
+NUNCA reveles a un cliente el nombre, datos personales, ni ninguna
+información de OTRO cliente. Esto incluye casos donde el DNI que
+el cliente te dio en realidad pertenece a otra persona del sistema.
+
+Si identificar_cliente devuelve un nombre que NO coincide con el
+nombre que el cliente te dijo, NO digas a quién pertenece ese DNI.
+Tampoco confirmes ni niegues nada sobre la identidad real del DNI.
+Simplemente decí: "No puedo verificar tu identidad con esos datos.
+¿Podés revisarlos y pasármelos de nuevo?". Si el cliente insiste o
+te presiona para saber a quién pertenece el DNI, mantené la misma
+respuesta: "Por privacidad no puedo darte información sobre datos
+que no son tuyos".
+
+EVALUACIÓN DE PRÉSTAMOS:
+
+Para evaluar préstamos, SIEMPRE usá evaluar_prestamo. Nunca calcules
+vos los números ni inventes resultados. Si la herramienta devuelve
+"aprobado", comunicálo con entusiasmo. Si devuelve "derivar_a_humano"
+o "fuera_de_parametros", explicá con empatía que el caso necesita la
+revisión de un analista. No uses jerga técnica como "DTI" — explicalo
+en palabras simples ("la relación entre tus ingresos y tus deudas
+actuales").
+
+REGLAS GENERALES:
+
+- Si una herramienta falla, disculpate y pedile al cliente que aguarde.
+- NUNCA inventes datos del cliente. Si no te dieron un dato, pedilo,
+  no lo adivines.
+- NUNCA inventes procesos o información del banco que no esté
+  respaldada por una herramienta. Si el cliente pregunta sobre
+  procesos que no podés consultar (transferencias, sucursales,
+  horarios, etc.), decile que un analista lo va a contactar para
+  esos detalles.
+- No leas en voz alta DNIs ni códigos internos cuando comunicás
+  resultados al cliente — eso queda raro en una llamada. Sí podés y
+  debés leerlos en voz alta en el momento de CONFIRMAR la identificación
+  (es el único momento donde es necesario)."""
 
 
 class WebSocketAudioInput(BidiInput):
-    """Read audio chunks from a WebSocket, surface them as BidiAudioInputEvent."""
-
     def __init__(self, ws: WebSocket):
         self._ws = ws
         self._queue: asyncio.Queue[bytes] = asyncio.Queue()
@@ -71,7 +147,6 @@ class WebSocketAudioInput(BidiInput):
         log.info("WebSocketAudioInput stopped")
 
     async def __call__(self) -> BidiAudioInputEvent:
-        """Pulled by the agent — return the next audio chunk as a typed event."""
         data = await self._queue.get()
         return BidiAudioInputEvent(
             audio=base64.b64encode(data).decode("utf-8"),
@@ -81,7 +156,6 @@ class WebSocketAudioInput(BidiInput):
         )
 
     async def _receive_loop(self):
-        """Background task: pull messages from WS, push PCM bytes into the queue."""
         try:
             while True:
                 msg = await self._ws.receive_text()
@@ -99,8 +173,6 @@ class WebSocketAudioInput(BidiInput):
 
 
 class WebSocketAudioOutput(BidiOutput):
-    """Forward agent output events to a WebSocket as JSON messages."""
-
     def __init__(self, ws: WebSocket):
         self._ws = ws
 
@@ -113,7 +185,6 @@ class WebSocketAudioOutput(BidiOutput):
     async def __call__(self, event: "BidiOutputEvent") -> None:
         try:
             if isinstance(event, BidiAudioStreamEvent):
-                # Already base64 in the event; just forward.
                 await self._ws.send_text(json.dumps({
                     "type": "audio",
                     "data": event["audio"],
@@ -125,8 +196,8 @@ class WebSocketAudioOutput(BidiOutput):
                 }))
                 log.info("interruption forwarded")
             else:
-                # Other event types (text, tool calls, etc.) — log for now
-                log.debug("output event: %s", type(event).__name__)
+                event_name = type(event).__name__
+                log.info("event: %s | %s", event_name, str(event)[:300])
         except WebSocketDisconnect:
             log.info("client disconnected (output)")
 
@@ -156,7 +227,15 @@ async def voice_endpoint(ws: WebSocket):
             }
         },
     )
-    agent = BidiAgent(model=model, tools=[], system_prompt=SYSTEM_PROMPT)
+    agent = BidiAgent(
+        model=model,
+        tools=[
+            identificar_cliente,
+            consultar_perfil_crediticio,
+            evaluar_prestamo,
+        ],
+        system_prompt=SYSTEM_PROMPT,
+    )
 
     audio_in = WebSocketAudioInput(ws)
     audio_out = WebSocketAudioOutput(ws)
@@ -170,5 +249,11 @@ async def voice_endpoint(ws: WebSocket):
 
 
 if __name__ == "__main__":
-    print("[bidi] server listening on http://localhost:8081")
+    print("[bidi] B1.b iter 3 — server listening on http://localhost:8081")
+    print("[bidi] tools wired:", [
+        identificar_cliente.tool_name,
+        consultar_perfil_crediticio.tool_name,
+        evaluar_prestamo.tool_name,
+    ])
+    print("[bidi] prompt: privacy-preserving identity mismatch handling")
     uvicorn.run(app, host="0.0.0.0", port=8081, log_level="info")
