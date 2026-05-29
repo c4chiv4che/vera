@@ -43,3 +43,6 @@ aws.json
 **/.cli/
 tfplan
 *.tfplan
+
+# Local backups during refactors (B2 onwards)
+*.b2-backup
