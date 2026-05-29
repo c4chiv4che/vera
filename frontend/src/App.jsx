@@ -4,6 +4,7 @@ import FlowScreen from './FlowScreen'
 import LogsScreen from './LogsScreen'
 import AdminScreen from './AdminScreen'
 import { useAgent } from './AgentContext'
+import { useVoiceSession } from './useVoiceSession'
 
 const SCREENS = [
   { id: 'patient', n: '01', title: 'Vista del paciente', desc: 'La conversación con voz, en vivo', color: 'text-cyan-400' },
@@ -56,28 +57,70 @@ function Bubble({ who, children, opacity = 1 }) {
   )
 }
 
+// Voice status labels — shown under the orb while we wait or while Vera is silent
+const VOICE_LABELS = {
+  'requesting-mic': 'pidiendo acceso al micrófono…',
+  'connecting': 'conectando con Vera…',
+  'active': 'hablá cuando quieras',
+  'ended': 'llamada finalizada',
+  'error': 'no pude acceder al micrófono',
+}
+
 function PatientScreen({ go }) {
-  const { messages, veraStatus, isRunning, sendMessage, reset } = useAgent()
+  const { messages, veraStatus, sendMessage, reset } = useAgent()
+  const [started, setStarted] = useState(false)
+  const { state: voiceState, error: voiceError, end: endVoice } = useVoiceSession({
+    url: 'ws://localhost:8081/ws',
+    autoStart: started,
+  })
+
+  const [textFallback, setTextFallback] = useState(false)
   const [input, setInput] = useState('')
   const scrollRef = useRef(null)
 
+  // Orb mood: prefer veraStatus while there's an active conversation;
+  // fall back to listen state otherwise.
   const mode = veraStatus === 'thinking' ? 'think' : veraStatus === 'speaking' ? 'speak' : 'listen'
   const active = messages.length > 0
+
+  // Bottom label under "Vera · Voice-Enabled Receptionist Assistant"
+  const callIsLive = voiceState === 'active'
+  const statusLine = callIsLive ? STATE_LABELS[mode] : (VOICE_LABELS[voiceState] || '')
 
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight
   }, [messages])
 
-  function submit() {
+  function submitText() {
     const text = input.trim()
-    if (!text || isRunning) return
+    if (!text) return
     sendMessage(text)
     setInput('')
+  }
+
+  function handleEndCall() {
+    endVoice()
+    // Note: we intentionally do NOT call reset() here. The conversation
+    // history should remain visible after the call ends so the user can
+    // see what happened. A future "new call" button would reset.
   }
 
   return (
     <div className="relative h-screen overflow-hidden flex flex-col">
       <button onClick={() => go('home')} className="absolute top-6 left-8 z-20 text-slate-400 hover:text-white transition-colors">← volver</button>
+
+      {/* Tap-to-start overlay. Browsers require a user gesture before AudioContext
+          and MediaStream tracks start producing real samples. Tapping anywhere
+          on the screen counts; we don't dictate where. */}
+      {!started && (
+        <button
+          onClick={() => setStarted(true)}
+          className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-[#0b1018]/80 backdrop-blur-sm cursor-pointer transition-opacity hover:bg-[#0b1018]/70"
+        >
+          <p className="text-3xl font-light text-slate-200">Tocá para hablar con Vera</p>
+          <p className="text-xs tracking-[0.3em] text-slate-500 uppercase mt-4">poné los auriculares antes</p>
+        </button>
+      )}
 
       <div className="relative h-[50vh] shrink-0">
         <div className="absolute inset-0"><VoiceOrb mode={mode} /></div>
@@ -86,7 +129,10 @@ function PatientScreen({ go }) {
           <div className="relative">
             <h1 className="text-5xl font-semibold tracking-tight">Vera</h1>
             <p className="text-xs tracking-[0.35em] text-slate-400 uppercase mt-3">Voice-Enabled Receptionist Assistant</p>
-            {!active && <p className="text-slate-500 text-sm mt-6">{STATE_LABELS[mode]}</p>}
+            {statusLine && <p className="text-slate-500 text-sm mt-6">{statusLine}</p>}
+            {voiceState === 'error' && voiceError && (
+              <p className="text-rose-400/70 text-xs mt-2 max-w-xs mx-auto">{voiceError}</p>
+            )}
           </div>
         </div>
       </div>
@@ -95,7 +141,9 @@ function PatientScreen({ go }) {
         <div ref={scrollRef} className="h-full overflow-y-auto px-6 pb-32 pt-8"
           style={{ maskImage: 'linear-gradient(to bottom, transparent 0%, black 22%, black 100%)', WebkitMaskImage: 'linear-gradient(to bottom, transparent 0%, black 22%, black 100%)' }}>
           <div className="max-w-2xl mx-auto flex flex-col gap-3">
-            {!active && <p className="text-center text-slate-600 text-sm pt-8">Escribí el primer mensaje del paciente para empezar</p>}
+            {!active && voiceState === 'active' && (
+              <p className="text-center text-slate-600 text-sm pt-8">Decile a Vera por qué llamás…</p>
+            )}
             {messages.map((m, i) => {
               const fromEnd = messages.length - 1 - i
               const opacity = fromEnd === 0 ? 1 : fromEnd === 1 ? 0.55 : fromEnd === 2 ? 0.3 : 0.15
@@ -106,23 +154,43 @@ function PatientScreen({ go }) {
         </div>
       </div>
 
-      <div className="absolute bottom-8 left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 w-full max-w-2xl px-6">
-        <input
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter') submit() }}
-          disabled={isRunning}
-          placeholder={isRunning ? 'Vera está respondiendo…' : 'Escribí el mensaje del paciente…'}
-          className="flex-1 text-[15px] px-4 py-2.5 rounded-full border border-slate-700 bg-slate-800/60 text-slate-100 placeholder:text-slate-500 outline-none focus:border-slate-500 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-        />
-        <button onClick={submit} disabled={isRunning}
-          className="shrink-0 text-sm px-5 py-2.5 rounded-full border border-slate-600 text-white bg-slate-800/60 hover:bg-slate-700/60 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
-          enviar
-        </button>
-        <button onClick={reset}
-          className="shrink-0 text-xs px-3 py-2.5 rounded-full border border-slate-700 text-slate-400 hover:text-white transition-colors">
-          ↺ reiniciar
-        </button>
+      {/* Bottom bar: voice controls + discrete text fallback toggle */}
+      <div className="absolute bottom-8 left-1/2 -translate-x-1/2 z-20 flex flex-col items-center gap-3 w-full max-w-2xl px-6">
+
+        {textFallback && (
+          <div className="flex items-center gap-2 w-full">
+            <input
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') submitText() }}
+              placeholder="Escribí tu mensaje…"
+              className="flex-1 text-[15px] px-4 py-2.5 rounded-full border border-slate-700 bg-slate-800/60 text-slate-100 placeholder:text-slate-500 outline-none focus:border-slate-500 transition-colors"
+            />
+            <button onClick={submitText}
+              className="shrink-0 text-sm px-5 py-2.5 rounded-full border border-slate-600 text-white bg-slate-800/60 hover:bg-slate-700/60 transition-colors">
+              enviar
+            </button>
+          </div>
+        )}
+
+        <div className="flex items-center gap-3">
+          {(voiceState === 'active' || voiceState === 'connecting' || voiceState === 'requesting-mic') && (
+            <button onClick={handleEndCall}
+              className="text-sm px-5 py-2.5 rounded-full border border-rose-500/40 text-rose-300 bg-rose-500/10 hover:bg-rose-500/20 transition-colors">
+              ■ terminar llamada
+            </button>
+          )}
+          {voiceState === 'ended' || voiceState === 'error' ? (
+            <button onClick={reset}
+              className="text-xs px-3 py-2.5 rounded-full border border-slate-700 text-slate-400 hover:text-white transition-colors">
+              ↺ limpiar conversación
+            </button>
+          ) : null}
+          <button onClick={() => setTextFallback((v) => !v)}
+            className="text-xs px-3 py-2.5 rounded-full border border-slate-800 text-slate-500 hover:text-slate-300 transition-colors">
+            {textFallback ? 'voz' : '⌨ usar texto'}
+          </button>
+        </div>
       </div>
     </div>
   )
