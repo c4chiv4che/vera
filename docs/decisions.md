@@ -200,3 +200,45 @@ The technical wiring was the small part. The bulk of B1.b turned out to be promp
 - *Bridge reconnection-during-session not yet exercised.* The reconnect-with-backoff logic compiled and runs at session start, but we did not actively kill and restart the BFF mid-session to verify the drop-and-resume behavior. Functional risk is low (the logic is straightforward), but the decision log notes it as not-empirically-verified. Will be exercised when B2.4's cleanup pass happens.
 
 **Status.** B2.1 closed. Bridge + translator working end-to-end; all four frontend view types will be able to consume voice events through the same channel they already use. PatientScreen voice integration (B2.2) is next.
+
+
+## 2026-05 — B2.2: PatientScreen rewritten for voice with browser audio capture
+
+**Context.** B2.1 wired the bidi voice server to broadcast AGUI events to the BFF, so the four frontend views could in principle react to a voice conversation. But the user-facing view (PatientScreen) was still the Phase A text input — voice was only accessible through the standalone HTML at `localhost:8081/`. B2.2's job was to replace PatientScreen so that visiting `?view=user` opens a real voice session backed by Nova Sonic, while the conversation events keep flowing to the other three monitoring views through the existing AGUI broadcaster.
+
+**Architecture.** A new custom hook `useVoiceSession({ url })` owns the audio path: `getUserMedia` → `AudioContext(16kHz)` → `ScriptProcessorNode(4096)` → Float32→Int16 PCM → base64 → WebSocket to the bidi at `:8081/ws`. Playback decodes incoming PCM16 @ 24kHz with a `playbackTime` accumulator for seamless chunk playback. PatientScreen consumes the hook for transport, the existing `AgentContext` for conversation state (messages, vera mood, tool calls), and the existing `VoiceOrb` for the visual. The conversation history is reactively populated by the AGUI events that B2.1 already routes through the BFF, so no state plumbing was added.
+
+**Why a hook and not inline.** Audio capture/playback is testable in isolation, PatientScreen stays readable, and if a future view needs voice (e.g. an agent supervisor view), the hook is reusable. Audio plumbing in the component would have meant ~250 lines of refs, useEffect, and async lifecycle mixed with UI markup.
+
+**Audio implementation: ScriptProcessorNode over AudioWorklet.** ScriptProcessorNode is deprecated per the Web Audio spec but works in all current browsers and is exactly what the standalone HTML uses. Choosing it meant porting working code verbatim instead of designing a new AudioWorklet processor (which requires a separate worklet file and more scaffolding). The deprecation notice is logged in the console but does not block audio. Documented as a future-work item if voice fluidity becomes an issue.
+
+**Two hard bugs hunted and fixed during B2.2.**
+
+1. *React StrictMode double-mount.* React 18+ in dev mode mounts → cleans up → mounts every effect. The first version of the hook treated cleanup as terminal: it set `endedRef.current = true`, which made the second mount short-circuit immediately, so the WebSocket was never opened. Confirmed by interleaved console logs showing `[voice] cleanup running` followed by no `[voice] hook starting`. Fixed by (a) resetting `endedRef.current = false` at the start of every effect run, (b) only setting `cancelled = true` on cleanup (not `endedRef`), (c) closing in-flight WebSockets cleanly when cancelled before they reach `onopen`. The hook is now safe to mount-unmount-mount within a single second.
+
+2. *User-gesture requirement for working audio capture.* Even after `audioCtx.state === 'running'`, the `ScriptProcessorNode.onaudioprocess` produces silent samples until the page has received a user gesture. The hook initially auto-started in `useEffect`, with no gesture in scope; Nova Sonic kept receiving audio frames but they were inaudible silence, leading to `ValidationException: Timed out waiting for input events`. Verified by side-by-side comparison: the standalone HTML works on first try because its entire flow is wrapped in a button `onclick`; the React version with auto-start failed identically every time. Fixed by adding a "Tocá para hablar con Vera" full-screen overlay button that wraps the first user gesture; on tap, `setStarted(true)` triggers the hook with `autoStart: true`. The hook's `autoStart` default was flipped to `false` to make this requirement explicit at the call site.
+
+**UX decisions, recorded.**
+
+- *Tap-to-start overlay over auto-start.* The user originally asked for "as soon as the view loads, ask for the mic and stay listening — like a real call." The gesture requirement makes auto-start impossible without sounding like a regression. The compromise was an overlay that covers the whole screen (any tap counts as the gesture), preserving the "no specific button" feel without lying about browser constraints.
+- *"Terminar llamada" button always visible while live.* No auto-detect of end-of-call. Honors the user's framing: a call ends when the human says so.
+- *Text fallback always visible as a small button.* Discoverable for accessibility/mic-failure cases.
+- *Conversation history persists after "terminar".* Closing the audio session does not reset the messages. The "↺ limpiar conversación" button (which surfaces only after end/error) explicitly resets.
+
+**Honest caveats.**
+
+- *Fluidity is marginally worse than the standalone HTML.* In side-by-side A/B testing, the standalone HTML felt more natural and Vera's responses started a beat sooner. The React version is usable but feels slightly more robotic and slightly more latent. Hypothesis: the React frontend loads TensorFlow.js, Three.js, ReactFlow, and Motion concurrently, competing with ScriptProcessorNode for main-thread time. AudioWorklet (deferred) may help by moving audio processing off the main thread. Recorded as a quality gap not a blocker — usable for sponsor demos with the caveat acknowledged.
+- *Three other views (flow, logs, admin) remain mocks from Phase A.* During B2.2 verification we observed they show hardcoded data (`bedrock.session.end`, `calls_resolved=1`, `Agents online: 5`) that does not react to the AGUI events the BFF is now broadcasting. The B2.1 bridge works — events do reach the BFF — but the views don't consume them. This was a wrong assumption carried from before the project: they were always demo mocks, not reactive views. Connecting them to AGUI events is genuinely new work, not a fix. Listed below.
+- *Assistant message duplication still visible.* The B2.1-documented `is_final`-per-sentence splitting bug renders Vera's longer answers as duplicated message bubbles in the user view. Confirmed visually during B2.2 testing. Deferred to B2.4 along with METRICS spam.
+- *Bug pre-existing in App.jsx line 219 (now ~234).* `useState` called after a conditional return, flagged by ESLint with `react-hooks/rules-of-hooks`. Predates B2.2; left in place to avoid scope creep. Deferred to B2.4.
+
+**Verification.** Multiple end-to-end conversations through the React UI: greeting, customer identification with DNI 31234567 (Laura Fernández) dictated digit-by-digit, loan request for 20.000 USD, approval, goodbye. Tool calls (`identificar_cliente`, `evaluar_prestamo`) fired correctly, results were spoken back to the user, conversation bubbles populated reactively from the AGUI broadcast. Privacy fix from B1.b iter-3 still holds: DNI mismatch produces "no puedo verificar tu identidad" without leaking the rightful owner. `■ terminar llamada` cleanly tears down the audio session and leaves the history visible.
+
+**Status.** B2.2 closed. PatientScreen integrated end-to-end with voice. Three monitoring views remain mocks and are recorded as separate work (not part of B2). Next planned hito is B2.3 (banking copy rewrite) or B2.4 (cleanup + the deferred bugs above), to be decided next session.
+
+**Deferred to later phases.**
+- B2.3: rewrite the health-themed copy ("Centro de salud", "paciente", "Martín") to banking-themed copy.
+- B2.4 cleanup: fix the bidi message-splitting and METRICS spam (B2.1), fix App.jsx line 234 useState-conditional, delete the standalone HTML at `bidi/index.html` (replaced by PatientScreen), mark or remove the BFF's `/chat` SSE handler if no longer used, write a README operational section documenting which venv to activate per terminal.
+- B2.x (future): wire FlowScreen, LogsScreen, AdminScreen to actually consume AGUI events instead of showing mock data. This is new feature work, not cleanup.
+- Reading B (post-B2): agent-as-config refactor to support multi-industry kits.
+- B3: deploy to AgentCore Runtime.
