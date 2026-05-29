@@ -164,3 +164,39 @@ The technical wiring was the small part. The bulk of B1.b turned out to be promp
 - *Invented DNIs when none is given.* When the customer is vague about their DNI, the agent occasionally fabricates one to call the tool with, rather than re-asking. Observed once in iteration 1, did not recur in iteration 3, but the prompt rule against invention should be strengthened.
 
 **Status.** B1.b verified and closed. The iter-3 prompt lives in `agent/app/vera/bidi/server.py` on `main`. B1 milestones (B1.a, B1.b) were merged to `main` as they completed rather than accumulating on a long-lived phase-b branch; this is a deviation from the original Phase B plan, accepted because the work is exploratory and the branch was getting in the way more than it helped. B1.c is queued as the first prompt-engineering pass to start after B2, unless we choose to refine the prompt before exposing it through the real frontend.
+
+
+## 2026-05 — B2.1: bidi server bridged to BFF via AGUI events for the monitoring views
+
+**Context.** Phase A built a four-view frontend (user, flow, logs, admin) where all views subscribe to AGUI events broadcast by the BFF. B1 added a bidi voice agent on its own WebSocket server (`:8081`), but that server emitted Strands `BidiAgent` events directly to its log without going to the BFF, so the flow/logs/admin views had no visibility into voice sessions. B2.1's job was to fix that: have the bidi server forward voice-conversation meta-events (transcripts, tool calls, metrics, run lifecycle) to the BFF, translated into AGUI format, so the other three views work during voice sessions without their code being touched.
+
+**Decision.** Implement a one-way bridge inside `bidi/server.py`: every time a Strands `BidiAgent` emits a non-audio event, translate it on the fly to an AGUI event and publish it to the BFF over a WebSocket client connection to a new `/agent-events` endpoint. The BFF rebroadcasts to all connected monitors. Audio frames never travel through the BFF — they stay on the short browser↔bidi path, preserving voice latency.
+
+**Architecture.** Two parallel channels from the bidi server's perspective. Audio path: `browser ↔ /ws on bidi ↔ Nova Sonic`, low latency, never touches the BFF. Meta-event path: `bidi server → BFF /agent-events → BFF broadcaster → monitor WS clients`. The four frontend views all subscribe to the BFF broadcaster (no change). The user view in B2.2 will additionally open its own WS to the bidi server for the audio path.
+
+**Why this pattern (and not the alternatives).**
+
+- *Bidi-as-producer-to-BFF, frontend-direct-to-bidi-for-audio (chosen).* Audio stays on the short path. Other views need zero code changes. BFF keeps being the broadcaster it already is.
+- *BFF proxies audio too.* Rejected. Doubles the audio hop for no functional gain. AWS's own Nova Sonic reference architectures (sample-nova-sonic-websocket-agentcore, agentcore-samples) show clients connecting directly to the bidi-hosting layer, never through an audio proxy. Adding a hop is estimated +100-300ms perceived latency on a model with sub-1s S2S budget.
+- *Frontend opens two WS (one to bidi, one to BFF).* Acceptable for the user view (which already needs both), but using it for all four views means rewriting all four. Rejected as default for that reason.
+
+**Run modeling.** One AGUI run per voice session (not per turn). `RUN_STARTED` is emitted when the WebSocket session opens; `RUN_FINISHED` when it closes. User and assistant messages stream as `USER_MESSAGE` / `TEXT_MESSAGE_*` events inside that run. This differs from the Phase A text agent which emits one run per HTTP request, but matches the conversational nature of a voice call ("a customer is talking to Vera" = one run).
+
+**Resilience.** The bridge to the BFF reconnects in the background with exponential backoff (0.5s → 5s cap). If the BFF is unavailable or restarts mid-session, the bridge drops events that occur while disconnected and reconnects when it can. The voice session is never blocked or slowed by bridge issues — translator emits are non-blocking and silently noop when not connected.
+
+**Trade-offs accepted.**
+
+- *Audio path bypasses the BFF.* Means the BFF cannot observe or shape the audio stream. For the demo this is the right call (audio doesn't need observation, latency does); if we later need server-side recording or moderation, that would require revisiting.
+- *METRICS are emitted per Nova Sonic usage event, ~85 times per session.* Not de-duplicated yet. The frontend stores them in a single state slot (last-wins), so functionally fine, but it's bandwidth waste. Listed below.
+- *AGUI events are constructed as raw JSON dicts in the translator, not via the `ag-ui-protocol` Python SDK.* The frontend already consumes raw JSON of that shape (it doesn't use any SDK either), so adding the SDK in the middle adds an abstraction with no payoff at this layer. The decision can be revisited if AGUI evolves and we need versioning support.
+- *Bridge target URL `ws://localhost:8787/agent-events` is hardcoded.* OK for local dev. Becomes an env var when we deploy.
+
+**How B2.1 was verified.** Three terminals + browser, one complete banking conversation in voice (greeting → identify customer with DNI 31234567 dictated digit-by-digit → confirm → request 20.000 → loan approved → goodbye). The monitor terminal received the full AGUI event stream including: `RUN_STARTED`, three `USER_MESSAGE`, four `TEXT_MESSAGE_START/CONTENT/END` cycles, two complete tool-call cycles (`TOOL_CALL_START/ARGS/END/RESULT` for `identificar_cliente` and `evaluar_prestamo`), many `METRICS`, and `RUN_FINISHED` at close. Tool arguments and results arrived structured correctly. The CRM-side happy path verified end-to-end through voice with all events visible to the broadcaster.
+
+**Bugs discovered, deferred to B2.4.**
+
+- *Assistant message splitting.* Nova Sonic emits `is_final=true` on `BidiTranscriptStreamEvent` per-sentence, not per-turn. The translator currently treats every `is_final=true` as end-of-message, so a long assistant response of N sentences generates N separate `TEXT_MESSAGE_*` bracketed groups, often with content repeated across them. The frontend will render these as N separate Vera bubbles. Needs heuristic to coalesce: probably "consider the assistant message done after K ms of silence" or "until the next tool call or user input arrives." Will be visible once B2.2 renders bubbles; easier to tune visually than blind.
+- *METRICS event spam.* ~85 emissions per ~90 second session, one per Strands usage tick. The frontend's `setMetrics` accepts last-wins, so visually only the final value matters, but the bandwidth and event-log noise are wasteful. Easy fix: only emit on assistant turn end. Deferred to B2.4 because the fix interacts with the message-splitting fix above.
+- *Bridge reconnection-during-session not yet exercised.* The reconnect-with-backoff logic compiled and runs at session start, but we did not actively kill and restart the BFF mid-session to verify the drop-and-resume behavior. Functional risk is low (the logic is straightforward), but the decision log notes it as not-empirically-verified. Will be exercised when B2.4's cleanup pass happens.
+
+**Status.** B2.1 closed. Bridge + translator working end-to-end; all four frontend view types will be able to consume voice events through the same channel they already use. PatientScreen voice integration (B2.2) is next.
