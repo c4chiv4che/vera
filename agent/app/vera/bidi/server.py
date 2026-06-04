@@ -196,15 +196,45 @@ class AGUIBridge:
 class AGUITranslator:
     """Translates BidiAgent events into AGUI events on the fly.
 
-    Stateful: tracks the current assistant message ID so that a stream
-    of `TEXT_MESSAGE_CONTENT` deltas is bracketed by a single START/END
-    pair. Reset between assistant turns.
+    Coalescing strategy (revised in B2.4 after observing real Nova Sonic
+    behaviour):
+
+    Nova Sonic emits BidiTranscriptStreamEvent per-SENTENCE, not per-turn,
+    AND emits each sentence TWICE: once with is_final=False and once with
+    is_final=True. Both copies carry the *full sentence text* in both
+    `delta.text` and `text` fields — they are NOT incremental deltas.
+
+    Naive treatment ("emit a TEXT_MESSAGE per is_final=True, then close
+    and reopen") produced (a) every sentence duplicated in the UI from
+    the False+True pair, and (b) every sentence rendered as its own
+    bubble because we closed/reopened on each is_final.
+
+    What we do instead:
+      - Ignore is_final=False entirely. The True copy is the authoritative
+        end-of-sentence event; the False one is redundant.
+      - On the first is_final=True after a user turn, open a TEXT_MESSAGE
+        and emit the sentence as a CONTENT delta.
+      - On every subsequent is_final=True while the message is open,
+        append another CONTENT delta with the new sentence.
+      - Close the message (emit TEXT_MESSAGE_END) only when the actor
+        actually changes: a USER_MESSAGE arrives, a tool is called, a
+        tool result comes back, or the session ends.
+
+    METRICS:
+      Nova Sonic emits BidiUsageEvent ~100 times per session as a
+      running counter. Forwarding all of them spams the broadcast for
+      no value (consumers only need the latest). We hold the latest
+      counter internally and emit a single METRICS event when the
+      assistant message is closed (end of turn) and when the session
+      ends, capturing the running totals at meaningful boundaries.
     """
 
     def __init__(self, thread_id: str, bridge: AGUIBridge):
         self._thread_id = thread_id
         self._bridge = bridge
         self._current_assistant_message_id = None
+        # Latest usage counters from Nova Sonic; emitted only at turn end.
+        self._latest_usage = None
 
     async def emit_run_started(self):
         await self._bridge.emit({
@@ -214,10 +244,36 @@ class AGUITranslator:
         })
 
     async def emit_run_finished(self):
+        # Flush the last usage snapshot before saying goodbye.
+        await self._flush_metrics()
+        await self._close_assistant_message_if_open()
         await self._bridge.emit({
             "type": "RUN_FINISHED",
             "threadId": self._thread_id,
         })
+
+    async def _close_assistant_message_if_open(self):
+        if self._current_assistant_message_id is not None:
+            await self._bridge.emit({
+                "type": "TEXT_MESSAGE_END",
+                "messageId": self._current_assistant_message_id,
+            })
+            self._current_assistant_message_id = None
+            # Closing the assistant turn is also the point to flush metrics.
+            await self._flush_metrics()
+
+    async def _flush_metrics(self):
+        if self._latest_usage is None:
+            return
+        await self._bridge.emit({
+            "type": "METRICS",
+            "inputTokens": self._latest_usage.get("inputTokens", 0),
+            "outputTokens": self._latest_usage.get("outputTokens", 0),
+            "totalTokens": self._latest_usage.get("totalTokens", 0),
+            "latencyMs": 0,
+        })
+        # Don't clear; subsequent calls during the same session will
+        # re-emit the latest snapshot, which is fine — it's last-wins.
 
     async def translate(self, event):
         """Inspect a BidiOutputEvent and emit zero or more AGUI events."""
@@ -226,10 +282,20 @@ class AGUITranslator:
         if event_name == "BidiTranscriptStreamEvent":
             role = event.get("role")
             is_final = event.get("is_final", False)
-            delta = (event.get("delta") or {}).get("text", "")
-            text = event.get("text", "")
+            # The is_final=False event is a redundant copy of the same
+            # sentence; only act on is_final=True.
+            if not is_final:
+                return
 
-            if role == "user" and is_final:
+            text = event.get("text", "")
+            if not text:
+                return
+
+            if role == "user":
+                # User turn: a user message also closes whatever assistant
+                # message was still open (defensive — should already be
+                # closed when the tool result for the previous turn came).
+                await self._close_assistant_message_if_open()
                 await self._bridge.emit({
                     "type": "USER_MESSAGE",
                     "message": {
@@ -241,27 +307,24 @@ class AGUITranslator:
                 return
 
             if role == "assistant":
-                if self._current_assistant_message_id is None and delta:
+                # If no message is open yet, open one.
+                if self._current_assistant_message_id is None:
                     self._current_assistant_message_id = str(uuid.uuid4())
                     await self._bridge.emit({
                         "type": "TEXT_MESSAGE_START",
                         "messageId": self._current_assistant_message_id,
                     })
-                if delta and self._current_assistant_message_id:
-                    await self._bridge.emit({
-                        "type": "TEXT_MESSAGE_CONTENT",
-                        "messageId": self._current_assistant_message_id,
-                        "delta": delta,
-                    })
-                if is_final and self._current_assistant_message_id:
-                    await self._bridge.emit({
-                        "type": "TEXT_MESSAGE_END",
-                        "messageId": self._current_assistant_message_id,
-                    })
-                    self._current_assistant_message_id = None
+                # Append this sentence as a content delta.
+                await self._bridge.emit({
+                    "type": "TEXT_MESSAGE_CONTENT",
+                    "messageId": self._current_assistant_message_id,
+                    "delta": text,
+                })
                 return
 
         if event_name == "ToolUseStreamEvent":
+            # A tool call marks end-of-turn from the assistant's side.
+            await self._close_assistant_message_if_open()
             tool_use = (event.get("delta") or {}).get("toolUse") or {}
             tool_call_id = tool_use.get("toolUseId")
             tool_name = tool_use.get("name")
@@ -302,15 +365,13 @@ class AGUITranslator:
             return
 
         if event_name == "BidiUsageEvent":
-            # Strands emits many usage events per turn (running counters).
-            # Mirror the most recent one as METRICS.
-            await self._bridge.emit({
-                "type": "METRICS",
+            # Keep the latest counter; flush at turn-end / session-end.
+            # Avoids ~100 redundant METRICS broadcasts per session.
+            self._latest_usage = {
                 "inputTokens": event.get("inputTokens", 0),
                 "outputTokens": event.get("outputTokens", 0),
                 "totalTokens": event.get("totalTokens", 0),
-                "latencyMs": 0,
-            })
+            }
             return
 
 
