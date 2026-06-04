@@ -1,0 +1,30 @@
+# Manifest for the Banking industry agent (Vera).
+# Loaded by the agent_loader at session start (Phase C, commit 2 onwards).
+# To add a new industry, copy this folder and edit.
+
+name: Vera
+industry: banking
+
+# Path is relative to this yaml file's directory.
+prompt_file: prompt.txt
+
+# Tool names to wire. Resolved via importlib from `industries.{industry}.tools`.
+tools:
+  - identificar_cliente
+  - consultar_perfil_crediticio
+  - evaluar_prestamo
+
+# Voice agent (bidi) settings.
+voice:
+  model_id: amazon.nova-sonic-v1:0
+  voice_id: lupe
+  input_rate: 16000
+  output_rate: 24000
+
+# Thread ID prefix for AGUI events emitted from this industry.
+# Helps consumers (monitoring views, debug logs) tell sessions apart.
+thread_id_prefix: banking-voice
+
+# Text agent (main.py) settings.
+text:
+  model_id: global.anthropic.claude-sonnet-4-5-20250929-v1:0
