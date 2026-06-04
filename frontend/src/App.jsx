@@ -7,10 +7,10 @@ import { useAgent } from './AgentContext'
 import { useVoiceSession } from './useVoiceSession'
 
 const SCREENS = [
-  { id: 'patient', n: '01', title: 'Vista del paciente', desc: 'La conversación con voz, en vivo', color: 'text-cyan-400' },
+  { id: 'patient', n: '01', title: 'Vista del cliente', desc: 'La conversación con voz, en vivo', color: 'text-cyan-400' },
   { id: 'flow', n: '02', title: 'Orquestación', desc: 'Qué servicios se activan ahora', color: 'text-violet-400' },
   { id: 'logs', n: '03', title: 'Logs técnicos', desc: 'El sistema por dentro, sin trucos', color: 'text-emerald-400' },
-  { id: 'admin', n: '04', title: 'Panel de control', desc: 'Pacientes, estado y ánimo', color: 'text-amber-400' },
+  { id: 'admin', n: '04', title: 'Panel de control', desc: 'Clientes, estado y ánimo', color: 'text-amber-400' },
 ]
 
 const STATE_LABELS = { listen: 'escuchando…', think: 'pensando…', speak: 'hablando…' }
@@ -18,10 +18,10 @@ const STATE_LABELS = { listen: 'escuchando…', think: 'pensando…', speak: 'ha
 function Home({ go }) {
   return (
     <div className="min-h-screen flex flex-col items-center justify-center px-6">
-      <p className="text-sm tracking-[0.3em] text-slate-500 uppercase mb-4">Centro de salud · asistente con voz</p>
+      <p className="text-sm tracking-[0.3em] text-slate-500 uppercase mb-4">Banco · asistente con voz</p>
       <h1 className="text-7xl font-semibold tracking-tight mb-3">Vera</h1>
       <p className="text-lg text-slate-400 mb-16 text-center max-w-md">
-        Tu recepción, ahora con voz. Agendá, consultá y resolvé hablando.
+        Tu recepción, ahora con voz. Consultá, pedí y resolvé hablando.
       </p>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 w-full max-w-3xl">
         {SCREENS.map((s) => (
@@ -49,7 +49,7 @@ function Bubble({ who, children, opacity = 1 }) {
         who === 'user' ? 'bg-cyan-500/15 text-cyan-100 rounded-br-sm' : 'bg-slate-800/70 text-slate-200 rounded-bl-sm'
       }`}>
         <span className={`block text-[10px] uppercase tracking-wider mb-1 ${who === 'user' ? 'text-cyan-400/60' : 'text-violet-400/60'}`}>
-          {who === 'user' ? 'Martín' : 'Vera'}
+          {who === 'user' ? 'Cliente' : 'Vera'}
         </span>
         {children}
       </div>
