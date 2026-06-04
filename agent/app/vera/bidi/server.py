@@ -44,11 +44,7 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from industries.banking.tools import (  # noqa: E402
-    identificar_cliente,
-    consultar_perfil_crediticio,
-    evaluar_prestamo,
-)
+from agent_loader import available_industries, load_industry  # noqa: E402
 from strands.experimental.bidi.agent import BidiAgent  # noqa: E402
 from strands.experimental.bidi.models import BidiNovaSonicModel  # noqa: E402
 from strands.experimental.bidi.types.events import (  # noqa: E402
@@ -65,13 +61,7 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("bidi-server")
 
 BFF_AGUI_URL = "ws://localhost:8787/agent-events"
-
-
-# System prompt loaded from the banking industry manifest.
-# Phase C commit 2 will replace this with a manifest-aware loader keyed
-# by the ?industry= query param.
-_PROMPT_PATH = Path(__file__).parent.parent / "industries" / "banking" / "prompt.txt"
-SYSTEM_PROMPT = _PROMPT_PATH.read_text()
+DEFAULT_INDUSTRY = "banking"
 
 
 class AGUIBridge:
@@ -415,9 +405,18 @@ app = FastAPI()
 @app.websocket("/ws")
 async def voice_endpoint(ws: WebSocket):
     await ws.accept()
-    log.info("client connected")
+    industry = ws.query_params.get("industry", DEFAULT_INDUSTRY)
+    log.info("client connected (industry=%s)", industry)
 
-    thread_id = f"voice-{uuid.uuid4().hex[:8]}"
+    try:
+        cfg = load_industry(industry)
+    except ValueError as e:
+        log.warning("rejecting session: %s", e)
+        await ws.send_text(json.dumps({"type": "error", "message": str(e)}))
+        await ws.close(code=4404)
+        return
+
+    thread_id = f"{cfg.thread_id_prefix}-{uuid.uuid4().hex[:8]}"
     bridge = AGUIBridge(BFF_AGUI_URL, thread_id)
     await bridge.start()
     translator = AGUITranslator(thread_id, bridge)
@@ -427,12 +426,12 @@ async def voice_endpoint(ws: WebSocket):
     await translator.emit_run_started()
 
     model = BidiNovaSonicModel(
-        model_id="amazon.nova-sonic-v1:0",
+        model_id=cfg.voice["model_id"],
         provider_config={
             "audio": {
-                "input_rate": 16000,
-                "output_rate": 24000,
-                "voice": "lupe",
+                "input_rate": cfg.voice["input_rate"],
+                "output_rate": cfg.voice["output_rate"],
+                "voice": cfg.voice["voice_id"],
                 "channels": 1,
                 "format": "pcm",
             }
@@ -440,12 +439,8 @@ async def voice_endpoint(ws: WebSocket):
     )
     agent = BidiAgent(
         model=model,
-        tools=[
-            identificar_cliente,
-            consultar_perfil_crediticio,
-            evaluar_prestamo,
-        ],
-        system_prompt=SYSTEM_PROMPT,
+        tools=cfg.tools,
+        system_prompt=cfg.prompt,
     )
 
     audio_in = WebSocketAudioInput(ws)
@@ -465,11 +460,8 @@ async def voice_endpoint(ws: WebSocket):
 
 
 if __name__ == "__main__":
-    print("[bidi] B2.1 — server listening on http://localhost:8081")
-    print("[bidi] tools wired:", [
-        identificar_cliente.tool_name,
-        consultar_perfil_crediticio.tool_name,
-        evaluar_prestamo.tool_name,
-    ])
+    print("[bidi] Phase C commit 2 — server listening on http://localhost:8081")
+    print(f"[bidi] industries available: {available_industries()}")
+    print(f"[bidi] default industry: {DEFAULT_INDUSTRY}")
     print(f"[bidi] AGUI bridge target: {BFF_AGUI_URL}")
     uvicorn.run(app, host="0.0.0.0", port=8081, log_level="info")
