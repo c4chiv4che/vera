@@ -224,14 +224,18 @@ function App() {
   const params = new URLSearchParams(window.location.search)
   const view = params.get('view')
 
+  // useState must be called unconditionally on every render to satisfy
+  // React's rules-of-hooks. Even when we end up returning a monitor view
+  // (where `screen` is unused), the hook itself has to be invoked.
+  const [screen, setScreen] = useState('home')
+
   // Monitor mode: a single view, full-screen, no home navigation
   if (view && VIEW_COMPONENTS[view]) {
     const ViewComponent = VIEW_COMPONENTS[view]
     return <ViewComponent go={() => {}} monitorMode />
   }
 
-  // Default: navigable home (as before)
-  const [screen, setScreen] = useState('home')
+  // Default: navigable home
   if (screen === 'home') return <Home go={setScreen} />
   if (screen === 'patient') return <PatientScreen go={setScreen} />
   if (screen === 'flow') return <FlowScreen go={setScreen} />
