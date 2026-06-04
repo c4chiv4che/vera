@@ -46,3 +46,6 @@ tfplan
 
 # Local backups during refactors (B2 onwards)
 *.b2-backup
+
+# Personal tracking tools (not part of the project)
+reporte.py
