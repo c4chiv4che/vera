@@ -203,25 +203,59 @@ npm run dev
 ~~~
 
 Open `http://localhost:5173/vera-pitch/?view=user` to talk to Vera.
-Switch the query string to `?view=flow`, `?view=logs`, or `?view=admin`
-to see the same conversation from different perspectives.
 
-## Running Phase B (sub-stage B1.a)
+Note: as of Phase B sub-stage B2.2, `?view=user` is a voice interface
+backed by the bidi server (see "Running Phase B" below), not the
+text-input form that Phase A originally shipped. The other three
+views (`?view=flow`, `?view=logs`, `?view=admin`) are the polished
+Phase A demo mocks. They display the look of an orchestration board,
+a tech-log stream, and an admin panel, but do not currently react to
+live conversation events — wiring them to the AGUI broadcast from
+the BFF is tracked as separate future work, not part of Phase B.
 
-Phase B reuses the same Python environment as Phase A. Make sure
-`portaudio19-dev` is installed on the host before `uv sync` (Linux).
+## Running Phase B (up to B2.2)
+
+Phase B keeps the Phase A processes running and adds the bidi voice
+server. The bidi server uses the same Python virtual environment as
+the text agent (`agent/app/vera/.venv`), but a fresh terminal does
+not activate it automatically — `source` it explicitly each time.
+
+Three terminals (in addition to the BFF and frontend already running
+from Phase A):
 
 ~~~
-cd agent/app/vera
-uv sync
-cd bidi
+# Terminal 4 — bidi voice server
+cd agent/app/vera/bidi
+source ../.venv/bin/activate
 python server.py
 ~~~
 
-Open `http://localhost:8081` in a browser. Use headphones to avoid
-echo. Click "iniciar conversación" and speak to Vera. The agent has
-no CRM tools wired in B1.a — it acknowledges that it is in test mode
-when asked about banking operations. Tool wiring lands in B1.b.
+The bidi server listens on `ws://localhost:8081/ws`. The React frontend
+connects there directly from `?view=user`, which (since B2.2) is a
+voice interface: tap anywhere on the overlay to grant the microphone
+gesture, then talk to Vera. Use headphones to avoid echo.
+
+What works end-to-end as of B2.2:
+- Voice conversation in `?view=user` with the CRM tools wired
+  (`identificar_cliente`, `consultar_perfil_crediticio`, `evaluar_prestamo`).
+- Privacy guardrails from B1.b iter-3 (DNI mismatch does not leak the
+  real owner of the document).
+- AGUI events from the voice conversation flow through the BFF and
+  are observable by any monitor connected to `ws://localhost:8787/`.
+
+Known caveats (tracked for future work):
+- Voice fluidity in the React frontend is marginally less responsive
+  than the deprecated standalone HTML used during B1.a/B1.b. Possible
+  mitigation via AudioWorklet is deferred.
+- The `?view=flow`, `?view=logs`, `?view=admin` screens are Phase A
+  mock dashboards, not live AGUI consumers. See decisions.md for
+  details.
+- Long assistant responses currently render as multiple bubbles with
+  partial content duplication (Nova Sonic emits `is_final=true`
+  per-sentence; the AGUI translator does not yet coalesce).
+
+The standalone HTML at `agent/app/vera/bidi/index.html` from B1.a was
+removed in B2.4 cleanup. The voice UI now lives only in PatientScreen.
 
 ## Cost estimate
 
