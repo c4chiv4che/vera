@@ -51,7 +51,7 @@ function decodePcm16Base64(b64) {
   return int16
 }
 
-export function useVoiceSession({ url, autoStart = false } = {}) {
+export function useVoiceSession({ url, industry, autoStart = false } = {}) {
   // 'idle' is the pre-mount state; we move to 'requesting-mic' immediately on mount when autoStart.
   const [state, setState] = useState('idle')
   const [error, setError] = useState(null)
@@ -146,7 +146,8 @@ export function useVoiceSession({ url, autoStart = false } = {}) {
       }
 
       setState('connecting')
-      const ws = new WebSocket(url)
+      const wsUrl = `${url}?industry=${encodeURIComponent(industry || 'banking')}`
+      const ws = new WebSocket(wsUrl)
       wsRef.current = ws
 
       ws.onopen = () => {
@@ -215,7 +216,7 @@ export function useVoiceSession({ url, autoStart = false } = {}) {
       // Don't set endedRef here. Let the next mount reset it.
       cleanup()
     }
-  }, [url, autoStart, cleanup])
+  }, [url, industry, autoStart, cleanup])
 
   return { state, error, end }
 }

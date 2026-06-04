@@ -66,11 +66,12 @@ const VOICE_LABELS = {
   'error': 'no pude acceder al micrófono',
 }
 
-function PatientScreen({ go }) {
+function PatientScreen({ go, industry }) {
   const { messages, veraStatus, sendMessage, reset } = useAgent()
   const [started, setStarted] = useState(false)
   const { state: voiceState, error: voiceError, end: endVoice } = useVoiceSession({
     url: 'ws://localhost:8081/ws',
+    industry,
     autoStart: started,
   })
 
@@ -223,6 +224,7 @@ const VIEW_COMPONENTS = {
 function App() {
   const params = new URLSearchParams(window.location.search)
   const view = params.get('view')
+  const industry = params.get('industry') || 'banking'
 
   // useState must be called unconditionally on every render to satisfy
   // React's rules-of-hooks. Even when we end up returning a monitor view
@@ -232,12 +234,12 @@ function App() {
   // Monitor mode: a single view, full-screen, no home navigation
   if (view && VIEW_COMPONENTS[view]) {
     const ViewComponent = VIEW_COMPONENTS[view]
-    return <ViewComponent go={() => {}} monitorMode />
+    return <ViewComponent go={() => {}} monitorMode industry={industry} />
   }
 
   // Default: navigable home
   if (screen === 'home') return <Home go={setScreen} />
-  if (screen === 'patient') return <PatientScreen go={setScreen} />
+  if (screen === 'patient') return <PatientScreen go={setScreen} industry={industry} />
   if (screen === 'flow') return <FlowScreen go={setScreen} />
   if (screen === 'logs') return <LogsScreen go={setScreen} />
   if (screen === 'admin') return <AdminScreen go={setScreen} />

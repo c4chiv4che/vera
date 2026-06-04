@@ -20,6 +20,11 @@ function parseResult(content) {
 }
 
 export function AgentProvider({ children }) {
+  // Read once at provider construction. The URL doesn't change during a
+  // session, so no state/listener — App.jsx parses the same param the
+  // same way; defaults to 'banking' so existing links stay working.
+  const industry = new URLSearchParams(window.location.search).get("industry") || "banking";
+
   const [messages, setMessages] = useState([]);
   const [veraStatus, setVeraStatus] = useState("idle");
   const [toolCalls, setToolCalls] = useState([]);
@@ -171,13 +176,13 @@ export function AgentProvider({ children }) {
       await fetch(`${BFF_HTTP}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text }),
+        body: JSON.stringify({ message: text, industry }),
       });
       // The user message and all events come back via WebSocket broadcast
     } catch (e) {
       console.error("[chat] failed to send", e);
     }
-  }, [isRunning]);
+  }, [isRunning, industry]);
 
   const reset = useCallback(async () => {
     try {
