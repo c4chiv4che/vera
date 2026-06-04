@@ -38,7 +38,6 @@ from typing import TYPE_CHECKING
 import websockets
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
 import uvicorn
 
 load_dotenv(Path(__file__).parent.parent / ".env")
@@ -407,11 +406,6 @@ class WebSocketAudioOutput(BidiOutput):
 
 
 app = FastAPI()
-
-
-@app.get("/")
-async def index():
-    return FileResponse(Path(__file__).parent / "index.html")
 
 
 @app.websocket("/ws")
