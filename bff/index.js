@@ -65,7 +65,7 @@ function broadcast(event) {
 let conversation = [];
 
 app.post("/chat", async (req, res) => {
-  const { message } = req.body;
+  const { message, industry = "banking" } = req.body;
   if (!message || typeof message !== "string") {
     return res.status(400).json({ error: "message (string) is required" });
   }
@@ -85,8 +85,9 @@ app.post("/chat", async (req, res) => {
     forwardedProps: {},
   };
 
+  const agentUrl = `${AGENT_URL}?industry=${encodeURIComponent(industry)}`;
   try {
-    const agentRes = await fetch(AGENT_URL, {
+    const agentRes = await fetch(agentUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(runInput),
