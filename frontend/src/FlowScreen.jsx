@@ -104,7 +104,7 @@ export default function FlowScreen({ go, monitorMode }) {
         }} />
         <svg viewBox="0 0 760 610" className="w-full h-full max-w-4xl relative" style={{ maxHeight: '74vh' }}>
           <defs>
-            {Object.entries(TYPE_COLORS).map(([k, c]) => (
+            {Object.entries(TYPE_COLORS).map(([k]) => (
               <filter key={k} id={`glow-${k}`} x="-80%" y="-80%" width="260%" height="260%">
                 <feGaussianBlur stdDeviation="4" result="b1" />
                 <feGaussianBlur stdDeviation="9" result="b2" />
