@@ -242,3 +242,36 @@ The technical wiring was the small part. The bulk of B1.b turned out to be promp
 - B2.x (future): wire FlowScreen, LogsScreen, AdminScreen to actually consume AGUI events instead of showing mock data. This is new feature work, not cleanup.
 - Reading B (post-B2): agent-as-config refactor to support multi-industry kits.
 - B3: deploy to AgentCore Runtime.
+
+
+## 2026-05 — B2.3 + B2.4: copy alignment and Phase B cleanup
+
+**Context.** B2.2 closed with PatientScreen integrated end-to-end as a voice interface, but with several known caveats explicitly tracked in the decision log: health-themed copy left over from Phase A, the standalone HTML at `bidi/index.html` already superseded, a pre-existing react-hooks/rules-of-hooks violation in `App.jsx`, the AGUI translator's assistant-message-splitting + duplication bug, and the METRICS spam. This entry covers the closure of all five items as a single rebrand-and-cleanup pass.
+
+**B2.3 — copy alignment.** The Phase A frontend was a health-clinic demo ("Centro de salud", "Vista del paciente", "Pacientes, estado y ánimo", customer labelled "Martín") but the agent it now drives is a bank. Five strings in `App.jsx` were changed to align: home subtitle to "Banco · asistente con voz", the tagline verb "Agendá" (clinical appointment vibe) to "Consultá, pedí", paciente → cliente in the screen title and admin description, and the chat bubble owner label "Martín" → "Cliente" (generic; the real customer name, when known, is announced by Vera through the AGUI stream after `identificar_cliente`).
+
+**B2.4 — cleanup, four pieces.**
+
+*Removed the standalone HTML* at `agent/app/vera/bidi/index.html` plus its `@app.get("/")` handler in `server.py` plus the now-unused `FileResponse` import. PatientScreen is the user-facing voice UI now; the standalone page had been kept for B1.a/B1.b debugging and was no longer reachable from the documented paths. The bidi server now only exposes `@app.websocket("/ws")`.
+
+*Fixed the React rules-of-hooks violation* in `App.jsx`. The `useState('home')` was declared after a conditional early return for monitor-mode views (`?view=user` etc.), violating the "hooks must run in the same order on every render" rule. ESLint had been flagging this since before B2; fix was mechanical (move the `useState` above the early return). Behaviour identical, ESLint now clean.
+
+*Updated README operations sections* to match reality. Two false claims were closed: Phase A's closing sentence ("Switch the query string to ?view=flow, ?view=logs, or ?view=admin to see the same conversation from different perspectives") was true for the original Phase A text demo but became aspirational once we discovered in B2.2 that those three views are static demo mocks that never consumed AGUI events. Phase B's section was still titled "sub-stage B1.a" and described running the just-removed standalone HTML. Both sections were rewritten with explicit caveats (mock dashboards, fluidity gap vs HTML, message-coalescing limitations) so a future contributor reading the README does not have to discover those caveats by getting confused, as we did.
+
+*Fixed the AGUI translator's message-splitting + METRICS spam* — the more substantial change in B2.4, deserving its own explanation. The decision log entry for B2.1 described the splitting bug as "Nova Sonic emits is_final=true per-sentence, the translator treats every is_final as end-of-message, so N sentences become N bubbles." This was correct as far as it went, but capturing fresh logs before writing the fix revealed a second factor: Nova Sonic also emits each sentence TWICE, once with `is_final=False` and once with `is_final=True`, and both copies carry the FULL sentence text in `delta.text` and `text` — they are not incremental deltas. The original translator emitted both copies and reset on every True, producing each sentence twice inside its own bubble AND one bubble per sentence. The fix ignores `is_final=False`, treats each `is_final=True` as "append this sentence to whatever assistant message is currently open", and only closes the assistant message on an actual actor change (USER_MESSAGE, tool call, tool result, or session end). For METRICS, the ~100 `BidiUsageEvent` per session that were each producing a METRICS broadcast were collapsed into a snapshot held in the translator, flushed once per turn-end and at session end (~3-5 per session in practice).
+
+**Honest lessons we wrote down for ourselves.**
+
+- *The B2.1 decision log entry was correct in spirit but incomplete in detail.* The "per-sentence is_final" observation was right, but it missed the duplication-within-sentence factor because no one had grepped a real log of a multi-sentence turn at the time. The B2.4 fix only landed cleanly because we captured logs first and read them before coding. The original B2.1 entry now reads as a partial diagnosis that B2.4 completes; left in place for chronological honesty rather than rewritten.
+- *We almost shipped a fix based on the partial diagnosis.* During B2.4.4 the first answer to "implement the fix" was "yes, based on hypotheses." We caught it ourselves before coding and chose to capture logs first. Worth recording: the cost of 15 minutes of empirical verification is small compared to the cost of a fix that introduces a worse bug.
+- *Branching discipline slipped briefly.* A single `.gitignore` change was committed directly to `main` instead of on a branch. It went through a lightweight cleanup (reset + cherry-pick + interactive rebase) once the inconsistency was noticed. The repo log ends up clean; the lesson stays.
+
+**Verification.** End-to-end voice conversation against the CRM happy path: greet, identify Laura (DNI 31234567), loan request 20.000 USD, approval with multi-sentence answer, goodbye. The approval response, previously split into 2-3 bubbles with duplicated text, now renders as a single bubble with the joined sentences and no internal duplication. BidiTranscriptStreamEvent count in the bidi log was 7 over the whole session (versus the 16-event pattern from before, when each sentence was double-counted by the translator). BidiUsageEvent count from Nova Sonic was 70; METRICS broadcasts to the BFF dropped from the previous ~85 per session to the per-turn-end cadence by construction.
+
+**Status.** Phase B sub-stages B2.3 and B2.4 closed. The remaining B2-era backlog items now sit in clearly demarcated tracks: 1) wiring the three monitoring views to live AGUI events is its own future feature project, not Phase B cleanup; 2) the React voice-fluidity gap vs the standalone HTML is recorded as a quality observation with AudioWorklet as a hypothetical future mitigation; 3) the agent-as-config refactor (the "lectura B") is the natural next step toward the README's multi-industry kit claim. Phase B as originally scoped is complete.
+
+**Deferred to later phases (unchanged from B2.2 with one addition).**
+- Wire FlowScreen / LogsScreen / AdminScreen to consume real AGUI events (new feature, not cleanup).
+- Investigate AudioWorklet to close the fluidity gap against the standalone HTML.
+- Agent-as-config refactor for multi-industry reproducibility.
+- B3: deploy to AgentCore Runtime (requires Docker on the dev host).
