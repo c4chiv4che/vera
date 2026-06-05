@@ -1,4 +1,4 @@
-import { useAgent } from './AgentContext'
+import { useAgent } from './useAgent'
 
 const NODES = [
   { id: 'voz',         x: 290, y: 30,  w: 180, h: 50, label: 'Voz del cliente',    svc: '',                  hint: 'próximamente · etapa Connect', type: 'io',   disabled: true },

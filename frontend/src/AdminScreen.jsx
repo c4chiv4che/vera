@@ -1,4 +1,4 @@
-import { useAgent } from './AgentContext'
+import { useAgent } from './useAgent'
 
 const AGENT_STATUS_STYLE = {
   AVAILABLE:          { label: 'AVAILABLE',          pill: 'bg-emerald-500/15 text-emerald-300', dot: '#34d399' },

@@ -3,7 +3,7 @@ import VoiceOrb from './VoiceOrb'
 import FlowScreen from './FlowScreen'
 import LogsScreen from './LogsScreen'
 import AdminScreen from './AdminScreen'
-import { useAgent } from './AgentContext'
+import { useAgent } from './useAgent'
 import { useVoiceSession } from './useVoiceSession'
 
 const SCREENS = [

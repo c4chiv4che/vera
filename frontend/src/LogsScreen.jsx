@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { useAgent } from './AgentContext'
+import { useAgent } from './useAgent'
 
 const LEVEL_COLORS = {
   INFO: 'text-sky-400',

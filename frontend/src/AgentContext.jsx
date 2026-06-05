@@ -1,15 +1,8 @@
-import { createContext, useContext, useRef, useState, useEffect, useCallback } from "react";
+import { useRef, useState, useEffect, useCallback } from "react";
+import { AgentContext } from "./useAgent";
 
 const BFF_HTTP = "http://localhost:8787";
 const BFF_WS = "ws://localhost:8787";
-
-const AgentContext = createContext(null);
-
-export function useAgent() {
-  const ctx = useContext(AgentContext);
-  if (!ctx) throw new Error("useAgent must be used within <AgentProvider>");
-  return ctx;
-}
 
 function parseResult(content) {
   try {
