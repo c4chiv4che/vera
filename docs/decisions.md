@@ -594,7 +594,8 @@ path and the layout path:
   "Bedrock razona" instances, "Resultado · derivado" present, zero
   React-Flow height warnings.
 - Manual end-to-end against the real CRM (voice session with DNI
-  31234567 → Laura Fernández → 20.000 USD → derivado): Mapa shows
+  31234567 → Laura Fernández; tested at 5.000.000 USD → derivar_a_humano
+  and 20.000.000 USD → fuera_de_parametros): Mapa shows
   the same lit-node sequence as before (regression cero), Trace
   shows the unrolled loop in horizontal order, session chip reads
   "sesión voz · banking-voice-<hex>", auto-pan keeps the latest
