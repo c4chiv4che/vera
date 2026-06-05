@@ -1,5 +1,7 @@
+import { useState } from 'react'
 import { useAgent } from './useAgent'
 import IndustryPlaceholder from './IndustryPlaceholder'
+import TraceGraph from './TraceGraph'
 
 const NODES = [
   { id: 'voz',         x: 290, y: 30,  w: 180, h: 50, label: 'Voz del cliente',    svc: '',                  hint: 'próximamente · etapa Connect', type: 'io',   disabled: true },
@@ -76,7 +78,8 @@ function dataOf(nodeId, toolCalls) {
 }
 
 export default function FlowScreen({ go, monitorMode, industry }) {
-  const { toolCalls, isRunning, conversationState, reset } = useAgent()
+  const { toolCalls, isRunning, conversationState, reset, traceLog } = useAgent()
+  const [view, setView] = useState('map')
   const nodeById = (id) => NODES.find((n) => n.id === id)
 
   const headerStatus = isRunning
@@ -93,10 +96,23 @@ export default function FlowScreen({ go, monitorMode, industry }) {
         )}
         <span className="text-sm font-mono text-violet-400">02</span>
         <span className="text-lg font-medium">Orquestación en vivo</span>
+        {industry === 'banking' && (
+          <div className="ml-3 flex rounded-full border border-slate-700 overflow-hidden text-xs">
+            <button
+              onClick={() => setView('map')}
+              className={`px-3 py-1 transition-colors ${view === 'map' ? 'bg-cyan-900/40 text-cyan-300' : 'text-slate-500 hover:text-slate-300'}`}
+            >Mapa</button>
+            <button
+              onClick={() => setView('trace')}
+              className={`px-3 py-1 transition-colors ${view === 'trace' ? 'bg-cyan-900/40 text-cyan-300' : 'text-slate-500 hover:text-slate-300'}`}
+            >Trace</button>
+          </div>
+        )}
         <span className="ml-auto text-sm text-slate-500">{headerStatus}</span>
       </header>
 
       {industry !== 'banking' ? <IndustryPlaceholder industry={industry} /> : (<>
+      {view === 'map' ? (
       <div className="flex-1 flex items-center justify-center p-4 relative overflow-hidden">
         <div className="absolute inset-0 opacity-[0.04]" style={{
           backgroundImage: 'linear-gradient(#fff 1px, transparent 1px), linear-gradient(90deg, #fff 1px, transparent 1px)',
@@ -184,6 +200,9 @@ export default function FlowScreen({ go, monitorMode, industry }) {
           })}
         </svg>
       </div>
+      ) : (
+      <TraceGraph traceLog={traceLog} />
+      )}
 
       <div className="flex justify-center pb-10">
         <button onClick={reset} className="text-sm px-5 py-2 rounded-full border border-slate-700 text-slate-400 hover:text-white transition-colors">↺ reiniciar</button>
