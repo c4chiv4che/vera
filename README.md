@@ -231,11 +231,18 @@ Open `http://localhost:5173/vera-pitch/?view=user` to talk to Vera.
 Note: as of Phase B sub-stage B2.2, `?view=user` is a voice interface
 backed by the bidi server (see "Running Phase B" below), not the
 text-input form that Phase A originally shipped. The other three
-views (`?view=flow`, `?view=logs`, `?view=admin`) are the polished
-Phase A demo mocks. They display the look of an orchestration board,
-a tech-log stream, and an admin panel, but do not currently react to
-live conversation events — wiring them to the AGUI broadcast from
-the BFF is tracked as separate future work, not part of Phase B.
+views react live to the AGUI broadcast from the BFF: `?view=flow`
+lights up its `identificar` / `bedrock` / `perfil` / `evaluar` nodes
+in real time as the agent fires the matching tools (the `voz` /
+`transcribir` / `responder` nodes are intentional placeholders for
+the future Connect stage); `?view=logs` streams real AGUI events
+including tool results; `?view=admin` is a hybrid — a live "Vera"
+agent and a real contact card (customer name from
+`identificar_cliente`, state derived from running tools and
+conversation lifecycle) embedded among labelled mock humans and
+queued contacts that exist as wallboard scenography. See the 2026-06
+errata entry in `docs/decisions.md` for how the previous "mock
+dashboards" claim came to be wrong and how it was re-verified today.
 
 ## Running Phase B (closed at B2.4)
 
@@ -271,9 +278,6 @@ Known caveats (tracked for future work):
 - Voice fluidity in the React frontend is marginally less responsive
   than the deprecated standalone HTML used during B1.a/B1.b. Possible
   mitigation via AudioWorklet is deferred.
-- The `?view=flow`, `?view=logs`, `?view=admin` screens are Phase A
-  mock dashboards, not live AGUI consumers. See decisions.md for
-  details.
 - Long assistant responses currently render as multiple bubbles with
   partial content duplication (Nova Sonic emits `is_final=true`
   per-sentence; the AGUI translator does not yet coalesce).
@@ -314,8 +318,9 @@ selectable via `?industry=<name>`. See `agent/app/vera/industries/banking/`
 as the canonical example.
 
 The three monitoring views (`?view=flow`, `?view=logs`, `?view=admin`)
-render a placeholder for non-banking industries — they are wired to
-banking-specific mocks only.
+render a placeholder for non-banking industries — their live AGUI
+wiring and the banking-themed scenography around it (node labels in
+flow, mock contact queue in admin) assume the banking manifest.
 
 ## Cost estimate
 

@@ -334,3 +334,108 @@ Process discipline:
 - Two debugging detours in this phase, both on the same bug: chased HMR-stale-browser (false), then HMR-stale-dev-server (false), before identifying the `isRunning` guard. Both detours were ruled out by user-driven experiments rather than code analysis — the bug was in user-visible behaviour that no headless reproduction surfaced without a real browser. Wrote the silent-drop rule afterwards so the next instance of this pattern fails loud.
 
 **Status.** Phase C closed. Branch `phase-c/n3-multi-industry` ready to merge to `main`. The original "Phase C — Telephony" (Amazon Connect integration over the existing voice agent) loses its phase number and moves to unscheduled future work; the Phase C label belongs to the multi-industry kit now.
+
+
+## 2026-06 — Errata: the three monitoring views were never mocks (verified live)
+
+**Context.** Repeated entries in this log (B2.2 verification, B2.3 +
+B2.4 operational rewrite, Phase C deferred-items list) and the README's
+operations sections have stated since 2026-05 that `?view=flow`,
+`?view=logs`, and `?view=admin` are Phase A demo mocks that do not
+consume AGUI events. "Wire the three views to live AGUI events"
+appeared as a deferred backlog item in every phase since then. A live
+re-verification today proves the claim is wrong; this entry exists to
+record the truth and the genesis of the error. Earlier entries are
+left intact for chronological honesty.
+
+**What is actually true (re-verified 2026-06-05 in a live voice
+session: DNI 31234567 → Laura Fernández → 20.000 → aprobado).**
+
+- *FlowScreen.* Subscribes to `useAgent()`. Real tool calls light the
+  `identificar` / `perfil` / `evaluar` nodes via `TOOL_BY_NODE`; the
+  `bedrock` node tracks `isRunning`; edges animate when downstream
+  status is `running`; node overlays render real tool result data
+  (customer name from `identificar_cliente`, decision + DTI from
+  `evaluar_prestamo`). The `voz` / `transcribir` / `responder` nodes
+  are intentional disabled placeholders for the future Connect stage,
+  not mocks. Wired during Phase A (commit `695ca1c`, 2026-05-28).
+
+- *LogsScreen.* Subscribes to `useAgent()`. `buildLines()` walks the
+  real AGUI event stream — `RUN_STARTED`, `TOOL_CALL_START`,
+  `TOOL_CALL_RESULT`, `TEXT_MESSAGE_START`, `RUN_FINISHED`, `METRICS`
+  — and renders structured log lines with real tool result data
+  (`decision=aprobado dti=X% score=Y`). The only static element is the
+  cosmetic `session a3f9c1 · region us-east-1` header label. Wired
+  during Phase A (commit `d2a7ab9`, 2026-05-28; metrics rendering
+  added the same day in `b0bbf4b`).
+
+- *AdminScreen.* Hybrid by deliberate design. `useConnectMetrics()`
+  builds a `real-current` contact from the live AGUI stream: customer
+  name from `identificar_cliente.nombre`; state cycling
+  `identifying` → `consulting` → `evaluating` → `resolved` /
+  `escalated` based on the running tool and conversation lifecycle;
+  channel `VOICE`. Vera appears as an agent with status driven by
+  `isRunning` (`ON_CONTACT` → `AFTER_CONTACT_WORK` → `AVAILABLE`).
+  The real card carries `isReal: true` and renders with a cyan border
+  + "live" badge. `MOCK_HUMAN_AGENTS` and `MOCK_CONTACTS` (all
+  `isReal: false`) sit around it as wallboard scenography — they make
+  the view look like a populated Connect instance rather than a
+  single-tile dashboard. KPI counts mix real and mock; sparklines and
+  the "Resolved without human" ring are hardcoded illustrative
+  numbers. Wired during Phase A (commit `c163b0d`, 2026-05-28); the
+  hybrid embed pattern is the Phase A design.
+
+**Genesis of the error.** During B2.2 verification we observed the
+three views displaying static-looking content while a voice session
+was open. The same B2.2 session had the audio path broken upstream —
+Nova Sonic received silent samples until the user-gesture overlay was
+added — so no AGUI events of consequence were flowing. The same B2.2
+notes record both "three other views remain mocks from Phase A" and,
+elsewhere, that the three views were not actually exercised in that
+session. The "mocks" conclusion was drawn from a single observation
+made during an upstream failure, reinforced by an assumption inherited
+from before this project (the B2.2 entry itself calls it "a wrong
+assumption carried from before the project"). The belief fossilised:
+B2.4 wrote it into the README, Phase C repeated it as a deferred
+item. The plumbing bugs that B2.4 fixed (translator sentence-splitting
++ METRICS spam) silently restored event flow to views that had been
+wired all along; nobody re-checked.
+
+**The backlog item is mostly already built.** "Wire FlowScreen,
+LogsScreen, AdminScreen to consume real AGUI events" — listed under
+deferred work in the B2.2, B2.3 + B2.4 and Phase C entries — was not
+new feature work. The wiring landed in Phase A and survived every
+refactor since. What remains is genuine *enhancement*, not initial
+build: a visible distinction in AdminScreen between the real card and
+the mock scenography (so a sponsor can tell which contact is the
+live one), a useful render of the METRICS snapshot in LogsScreen,
+similar polish judgment calls. Those are tracked separately, not by
+this entry.
+
+**Lesson.** Two failure modes intersected here:
+
+1. An observation made *during* an upstream failure is not a
+   verification. If the path that should feed a view is silent, the
+   view will look the same whether it is wired or not. The B2.2
+   conclusion should have been "view behaviour cannot be assessed
+   without audio working" — instead it was promoted to a fact.
+
+2. Beliefs inherited from one's own prior decision log are not
+   self-validating. The B2.4 README rewrite and the Phase C
+   deferred-items list both quoted the B2.2 conclusion without
+   re-running the test. Rule going forward: before any new entry
+   re-publishes a behavioural claim from an earlier entry,
+   re-verify it against the current code with a real session.
+
+The review of this very errata produced a third instance of the
+pattern: a correction asserted from memory (that the AGUI translator
+"doesn't emit `TOOL_CALL_RESULT`") was itself refuted by reading the
+code (`agent/app/vera/bidi/server.py` line 294 emits exactly that).
+The rule applies in real time to anything that touches the decision
+log, including its own corrections.
+
+**Status.** Errata recorded. README updated in the same commit to drop
+the false claims and describe what the views actually do. The
+deferred "wire three views" line in the B2.2 / B2.3 + B2.4 / Phase C
+entries is *not* edited — the chronology is preserved, and this entry
+is the authoritative correction.
