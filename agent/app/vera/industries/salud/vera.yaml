@@ -1,0 +1,32 @@
+# Manifest for the Salud (healthcare) industry agent.
+# Memory-mock backend — see industries/salud/tools.py docstring for the
+# scope and known limitations.
+
+name: Vera
+industry: salud
+
+# Path is relative to this yaml file's directory.
+prompt_file: prompt.txt
+
+# Tool names to wire. Resolved via importlib from `industries.salud.tools`.
+tools:
+  - identificar_paciente
+  - consultar_historia
+  - agendar_turno
+
+# Voice agent (bidi) settings. Same model family as banking — the
+# industry change lives in the prompt + tools + copy, not the model.
+voice:
+  model_id: amazon.nova-sonic-v1:0
+  voice_id: lupe
+  input_rate: 16000
+  output_rate: 24000
+
+# Thread ID prefix lets the monitoring views and the Trace session chip
+# tell salud-voice runs apart from banking-voice runs without inspecting
+# anything else.
+thread_id_prefix: salud-voice
+
+# Text agent (main.py) settings.
+text:
+  model_id: global.anthropic.claude-sonnet-4-5-20250929-v1:0
