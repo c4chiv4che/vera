@@ -122,6 +122,14 @@ A full demo requires four local processes plus the deployed CRM:
 | 8787 | BFF (Node + Express)  | All frontend views (event broadcast + `/chat` proxy)  | `npm start` (in `bff/`)                                     |
 | 5173 | Frontend (Vite)       | The UI itself                                         | `npm run dev` (in `frontend/`)                              |
 
+To avoid the four-terminal ritual, `./dev.sh start|stop|status|restart|logs`
+manages all four as background processes (logs in `tmp/logs/`, pidfiles
+in `tmp/pids/`, both gitignored). `./dev.sh status` distinguishes
+`ok` / `stopped` / `zombie-port` (foreign PID holding the port) /
+`crashed` (our PID died) / `orphan-listening` (port held but no live
+pidfile) by cross-referencing `lsof` with the pidfile per service.
+Linux-only; no tmux, no docker-compose.
+
 The text agent (`:8080`) is required even for a voice-only demo
 because the text-fallback button is always visible in `?view=user`
 and posts to it through the BFF. A missing `:8080` fails with no

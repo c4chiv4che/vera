@@ -47,5 +47,8 @@ tfplan
 # Local backups during refactors (B2 onwards)
 *.b2-backup
 
+# dev.sh runtime state: pidfiles + per-service logfiles
+tmp/
+
 # Personal tracking tools (not part of the project)
 reporte.py
