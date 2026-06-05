@@ -20,10 +20,10 @@ const CONTACT_STATE_STYLE = {
 const MOOD_DOT = { calm: '#34d399', neutral: '#94a3b8', distressed: '#f87171' }
 
 const MOCK_HUMAN_AGENTS = [
-  { id: 'carolina', name: 'Carolina M.', status: 'ON_CONTACT',         contactId: 'mock-diego' },
-  { id: 'mariano',  name: 'Mariano F.',  status: 'ON_CONTACT',         contactId: 'mock-elena' },
-  { id: 'sofia',    name: 'Sofía R.',    status: 'AFTER_CONTACT_WORK' },
-  { id: 'tomas',    name: 'Tomás L.',    status: 'AVAILABLE' },
+  { id: 'carolina', name: 'Carolina M.', status: 'ON_CONTACT',         contactId: 'mock-diego', isReal: false },
+  { id: 'mariano',  name: 'Mariano F.',  status: 'ON_CONTACT',         contactId: 'mock-elena', isReal: false },
+  { id: 'sofia',    name: 'Sofía R.',    status: 'AFTER_CONTACT_WORK',                          isReal: false },
+  { id: 'tomas',    name: 'Tomás L.',    status: 'AVAILABLE',                                   isReal: false },
 ]
 
 const MOCK_CONTACTS = [
@@ -215,6 +215,7 @@ function AgentList({ agents, contacts }) {
                 <p className="text-sm font-medium text-slate-200 flex items-center gap-2">
                   {a.name}
                   {a.isBot && <span className="text-[10px] px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-300 border border-violet-500/30">AI</span>}
+                  {a.isReal === false && <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-700/30 text-slate-400 border border-slate-600/40">demo</span>}
                 </p>
                 {contact && <p className="text-xs text-slate-500 truncate">→ {contact.customerName}</p>}
               </div>
@@ -262,6 +263,7 @@ function ContactList({ contacts }) {
                 <p className="text-sm font-medium text-slate-200 flex items-center gap-2">
                   {c.customerName}
                   {c.isReal && <span className="text-[10px] px-1.5 py-0.5 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">live</span>}
+                  {c.isReal === false && <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-700/30 text-slate-400 border border-slate-600/40">demo</span>}
                 </p>
                 <p className={`text-xs truncate ${isAlert ? 'text-red-300/80' : 'text-slate-500'}`}>{c.task}</p>
               </div>
