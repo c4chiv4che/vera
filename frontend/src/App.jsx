@@ -240,9 +240,9 @@ function App() {
   // Default: navigable home
   if (screen === 'home') return <Home go={setScreen} />
   if (screen === 'patient') return <PatientScreen go={setScreen} industry={industry} />
-  if (screen === 'flow') return <FlowScreen go={setScreen} />
-  if (screen === 'logs') return <LogsScreen go={setScreen} />
-  if (screen === 'admin') return <AdminScreen go={setScreen} />
+  if (screen === 'flow') return <FlowScreen go={setScreen} industry={industry} />
+  if (screen === 'logs') return <LogsScreen go={setScreen} industry={industry} />
+  if (screen === 'admin') return <AdminScreen go={setScreen} industry={industry} />
   return <Screen id={screen} go={setScreen} />
 }
 

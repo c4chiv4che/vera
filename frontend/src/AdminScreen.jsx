@@ -1,4 +1,5 @@
 import { useAgent } from './useAgent'
+import IndustryPlaceholder from './IndustryPlaceholder'
 
 const AGENT_STATUS_STYLE = {
   AVAILABLE:          { label: 'AVAILABLE',          pill: 'bg-emerald-500/15 text-emerald-300', dot: '#34d399' },
@@ -275,7 +276,7 @@ function ContactList({ contacts }) {
 }
 
 // ─── Capa 3 · Pantalla ───────────────────────────────────────────────────────
-export default function AdminScreen({ go, monitorMode }) {
+export default function AdminScreen({ go, monitorMode, industry }) {
   const { reset } = useAgent()
   const { metricResults, agents, contacts } = useConnectMetrics()
 
@@ -293,6 +294,7 @@ export default function AdminScreen({ go, monitorMode }) {
         </span>
       </header>
 
+      {industry !== 'banking' ? <IndustryPlaceholder industry={industry} /> : (
       <div className="flex-1 overflow-y-auto px-8 py-8">
         <div className="max-w-6xl mx-auto">
           <KPIStrip metricResults={metricResults} />
@@ -305,6 +307,7 @@ export default function AdminScreen({ go, monitorMode }) {
           </div>
         </div>
       </div>
+      )}
     </div>
   )
 }

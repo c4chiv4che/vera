@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { useAgent } from './useAgent'
+import IndustryPlaceholder from './IndustryPlaceholder'
 
 const LEVEL_COLORS = {
   INFO: 'text-sky-400',
@@ -62,7 +63,7 @@ function buildLines(events, toolCalls, metrics) {
   return lines
 }
 
-export default function LogsScreen({ go, monitorMode }) {
+export default function LogsScreen({ go, monitorMode, industry }) {
   const { events, toolCalls, metrics, reset, isRunning } = useAgent()
   const scrollRef = useRef(null)
   const lines = buildLines(events, toolCalls, metrics)
@@ -82,6 +83,7 @@ export default function LogsScreen({ go, monitorMode }) {
         <span className="ml-auto text-sm text-slate-500 font-mono">session a3f9c1 · region us-east-1</span>
       </header>
 
+      {industry !== 'banking' ? <IndustryPlaceholder industry={industry} /> : (<>
       <div className="flex-1 flex items-center justify-center p-6">
         <div className="w-full max-w-4xl">
           <div className="flex items-center gap-2 px-4 py-2.5 rounded-t-xl bg-slate-900 border border-slate-800 border-b-0">
@@ -115,6 +117,7 @@ export default function LogsScreen({ go, monitorMode }) {
       <div className="flex justify-center pb-10">
         <button onClick={reset} className="text-sm px-5 py-2 rounded-full border border-slate-700 text-slate-400 hover:text-white transition-colors">↺ reiniciar</button>
       </div>
+      </>)}
     </div>
   )
 }

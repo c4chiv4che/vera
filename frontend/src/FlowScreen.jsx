@@ -1,4 +1,5 @@
 import { useAgent } from './useAgent'
+import IndustryPlaceholder from './IndustryPlaceholder'
 
 const NODES = [
   { id: 'voz',         x: 290, y: 30,  w: 180, h: 50, label: 'Voz del cliente',    svc: '',                  hint: 'próximamente · etapa Connect', type: 'io',   disabled: true },
@@ -74,7 +75,7 @@ function dataOf(nodeId, toolCalls) {
   return null
 }
 
-export default function FlowScreen({ go, monitorMode }) {
+export default function FlowScreen({ go, monitorMode, industry }) {
   const { toolCalls, isRunning, conversationState, reset } = useAgent()
   const nodeById = (id) => NODES.find((n) => n.id === id)
 
@@ -95,6 +96,7 @@ export default function FlowScreen({ go, monitorMode }) {
         <span className="ml-auto text-sm text-slate-500">{headerStatus}</span>
       </header>
 
+      {industry !== 'banking' ? <IndustryPlaceholder industry={industry} /> : (<>
       <div className="flex-1 flex items-center justify-center p-4 relative overflow-hidden">
         <div className="absolute inset-0 opacity-[0.04]" style={{
           backgroundImage: 'linear-gradient(#fff 1px, transparent 1px), linear-gradient(90deg, #fff 1px, transparent 1px)',
@@ -186,6 +188,7 @@ export default function FlowScreen({ go, monitorMode }) {
       <div className="flex justify-center pb-10">
         <button onClick={reset} className="text-sm px-5 py-2 rounded-full border border-slate-700 text-slate-400 hover:text-white transition-colors">↺ reiniciar</button>
       </div>
+      </>)}
     </div>
   )
 }
