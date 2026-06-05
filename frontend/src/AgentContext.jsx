@@ -36,6 +36,10 @@ export function AgentProvider({ children }) {
 
   const streamingRef = useRef({ id: null, text: "" });
   const wsRef = useRef(null);
+  // Debounce in-flight text submits without coupling to `isRunning`, which
+  // is set by RUN_STARTED from ANY agent run — including the voice session
+  // — and would silently block text fallback for the entire voice call.
+  const textBusyRef = useRef(false);
 
   const logEvent = useCallback((type, detail) => {
     const ts = new Date().toLocaleTimeString("es-AR", { hour12: false });
@@ -171,7 +175,12 @@ export function AgentProvider({ children }) {
   }, [handleEvent]);
 
   const sendMessage = useCallback(async (text) => {
-    if (!text?.trim() || isRunning) return;
+    if (!text?.trim()) return;
+    if (textBusyRef.current) {
+      console.warn("[chat] message dropped: send in flight");
+      return;
+    }
+    textBusyRef.current = true;
     try {
       await fetch(`${BFF_HTTP}/chat`, {
         method: "POST",
@@ -181,8 +190,10 @@ export function AgentProvider({ children }) {
       // The user message and all events come back via WebSocket broadcast
     } catch (e) {
       console.error("[chat] failed to send", e);
+    } finally {
+      textBusyRef.current = false;
     }
-  }, [isRunning, industry]);
+  }, [industry]);
 
   const reset = useCallback(async () => {
     try {
