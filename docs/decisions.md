@@ -638,3 +638,125 @@ path and the layout path:
   messages, tool arch sublabel
 
 **Status.** Closed. Merged to `main`.
+
+
+## 2026-06 — Salud: second industry as a memory-mock, validating the Phase C kit pattern
+
+**Context.** Phase C closed with banking as the only industry that
+shipped with a manifest. The claim was that the multi-industry kit
+made adding a new vertical "a copy-edit operation" — but with N=1
+there was no way to know for sure. This entry covers the addition of
+`salud` (healthcare) as the second vertical and what that exercise
+revealed about the kit.
+
+**Decision.** Salud ships as a memory-mock industry: three seeded
+patients live in a module-level dict inside
+`industries/salud/tools.py`, and `agendar_turno` appends appointments
+to an in-process list that is lost on agent restart. No Terraform, no
+second DynamoDB, no second API Gateway. The point of this commit was
+to test the kit pattern itself, not to build a second production CRM.
+
+**Why memory-mock over Terraform-second-CRM.**
+
+- *Validates exactly what's being claimed.* Phase C promised the kit
+  was a copy-edit operation. Standing up a second CRM would test that
+  the entire stack scales to two industries, which is a different (and
+  weaker) claim — the kit's value proposition would still be unproven
+  if we'd also done a lot of non-kit work along the way. Memory-mock
+  forces every required change to be inside `industries/salud/` or it
+  shows up as a kit bug.
+- *Reproducibility for the next SA.* The README and decision log
+  promise the kit is adaptable to other industries. A reader copying
+  banking/ as a template needs to see what the minimum viable shape
+  is — a memory-mock answers "what's the smallest thing that works"
+  better than another full deployment.
+- *Cost and operational drag.* A second CRM doubles the Terraform
+  surface, the AWS bills (small but not zero), and the steps in any
+  future contributor's setup. Not worth it for a pattern test.
+
+**The kit pattern held: no non-industry files touched.**
+
+The salud vertical needed exactly four files, all under
+`agent/app/vera/industries/salud/`: `__init__.py`, `vera.yaml`,
+`prompt.txt`, `tools.py`. Zero changes to `agent_loader.py`,
+`main.py`, `bidi/server.py`, the BFF, the frontend, or anywhere else.
+Verified before commit by running `load_industry('salud')` and
+`load_industry('banking')` back-to-back from the same Python process
+— both resolve cleanly, the `_agents_by_industry` cache in `main.py`
+now holds two entries (the first time this code path was exercised
+in practice).
+
+**Privacy: conscious inheritance, not duplication.**
+
+The salud prompt explicitly names banking iter-3 as the source of
+its privacy rule and reinforces it for medical data sensitivity:
+"Los datos médicos son aún más sensibles que los financieros.
+Aplicá el mismo patrón que en banking iter-3, reforzado por el
+dominio." This is deliberate — a future reader should see this as a
+considered decision (the same rule applies because the threat model
+is the same: a caller claiming an identity, a tool returning data
+for a real owner, the gap in between is where leaks happen). Not a
+copy-paste of words but an inheritance of pattern.
+
+**Phase C debts that become observable now that N=2.**
+
+The Phase C decision log listed several "deferred / known
+limitations" that were invisible while banking was the only
+industry. Adding salud turned some of them into things a demo viewer
+can see:
+
+- *Text agent `DEMO_THREAD_ID = "vera-demo"` is shared across
+  industries.* `/metrics/{thread_id}` does cross-industry lookup,
+  and the conversation history threaded into the agent is keyed by
+  the same string for both. **Expected, now observable:** if a user
+  switches from `?industry=banking` to `?industry=salud` in the
+  same text session, the salud Vera sees the banking conversation
+  history. This is the Phase C debt manifesting, not a salud bug.
+  Recorded here so the next session that flags it doesn't mistake
+  it for new breakage.
+- *PatientScreen copy is banking-themed.* "Banco · asistente con
+  voz" and "Cliente" labels render for `?view=user&industry=salud`
+  too. Visible mismatch with the salud agent identity. Tracked as
+  copy-per-industry debt; not fixed today because the scope of
+  this commit is validating the agent-side kit pattern, and the
+  frontend copy-per-industry refactor is a distinct piece.
+- *The three monitoring views show their non-banking placeholder.*
+  This was already the expected behaviour by Phase C decision 6;
+  worth restating here so the placeholder is read as
+  intentional-by-design, not a salud regression. The Trace toggle
+  in vista 02 is gated to banking by the same rule.
+
+**Kit isolation, verified.**
+
+The seeded DNI set in `industries/salud/tools.py` does not overlap
+banking's (`30111222`, `25333444`, `28555666` vs banking's
+`31234567`, `20111222`, etc.). Calling `identificar_paciente` with
+the banking Laura DNI (`31234567`) returns "No encuentro un paciente
+con ese DNI" — no leakage in either direction. Verified pre-commit
+with a Python smoke against the tools.
+
+**Trade-offs accepted.**
+
+- `agendar_turno` appointments are lost on agent restart. Documented
+  in the module docstring and the README. A real demo flow either
+  starts fresh per session (which the demo does anyway) or accepts
+  that follow-up "did the turno I asked for last week still exist"
+  questions don't work.
+- No concurrency control on `_TURNOS`. Single-user demo assumption,
+  same as banking's `DEMO_THREAD_ID`. If the demo ever became
+  multi-tenant, both would need work.
+- `agendar_turno` doesn't model availability — it confirms the
+  requested date verbatim. Realistic enough for a voice demo where
+  the agent says "te confirmo el turno para el 20 de junio" without
+  the conversation getting bogged down in scheduling logic.
+
+**Branch.** `feature/industry-salud`, two commits:
+
+- `c11b27f` — feat(agent): salud industry — memory-mock tools +
+  privacy-inheriting prompt
+- this commit — docs: salud industry — README + decision log entry
+
+**Status.** Active until the manual end-to-end verification passes
+(voice flow against the salud vertical, banking regression cero,
+the cross-isolation probe with Laura's DNI in salud). Will be
+closed after merge.

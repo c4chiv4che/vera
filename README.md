@@ -28,11 +28,12 @@ AGUI events flowing through the BFF, and the user view rewritten as a
 voice interface. See `docs/decisions.md` for the full arc (B1.a → B2.4).
 
 Phase C — Multi-industry kit. Complete. The agent is now parameterised
-by industry via `?industry=<name>` in the URL; banking is the only
-industry that ships with a manifest, but the scaffolding (per-industry
-folder with `tools.py`, `prompt.txt`, `vera.yaml`) makes adding another
-one a copy-edit operation. See the "Multi-industry" section below for
-how to add one and `docs/decisions.md` for the architecture rationale.
+by industry via `?industry=<name>` in the URL; banking ships with a
+real CRM, and salud ships as a memory-mock vertical that proved the
+kit pattern is genuinely a copy-edit operation (zero changes to the
+loader, agents, BFF, or frontend were needed to add it). See the
+"Multi-industry" section below for how to add one and
+`docs/decisions.md` for the architecture rationale.
 
 Future work (unscheduled). Telephony integration with Amazon Connect
 to expose Vera over a real phone number, on top of the existing voice
@@ -330,10 +331,28 @@ Restart the bidi server and the text agent. The new industry becomes
 selectable via `?industry=<name>`. See `agent/app/vera/industries/banking/`
 as the canonical example.
 
+Salud (`?industry=salud`) is the second vertical and ships as a
+memory-mock industry: three patients live in
+`industries/salud/tools.py`, and `agendar_turno` appends to an
+in-process list that is lost when the agent restarts. The point is to
+prove the kit pattern (manifest + loader + per-industry tools) works
+without standing up a second AWS deployment. The privacy rule from
+banking iter-3 — DNI mismatch must not reveal the real owner — is
+consciously inherited in the salud prompt and reinforced for medical
+data sensitivity. The monitoring views (see below) show their
+placeholder for salud, which is the expected behaviour.
+
 The three monitoring views (`?view=flow`, `?view=logs`, `?view=admin`)
 render a placeholder for non-banking industries — their live AGUI
 wiring and the banking-themed scenography around it (node labels in
-flow, mock contact queue in admin) assume the banking manifest.
+flow, mock contact queue in admin) assume the banking manifest. The
+Trace toggle in `?view=flow` is also gated to banking for the same
+reason. This is by design, not a bug.
+
+The user-facing voice view (`?view=user`) keeps its banking-themed
+copy ("Banco · asistente con voz", "Cliente") regardless of
+`?industry=`. Tracked in `docs/decisions.md` as a copy-per-industry
+debt; not blocking salud usage.
 
 ## Cost estimate
 
