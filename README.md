@@ -21,16 +21,23 @@ with four synchronized live views (user chat, flow visualization,
 structured logs, Connect-style admin wallboard). End-to-end token usage,
 latency, and tool-call traces are surfaced in the UI.
 
-Phase B — Voice channel. In progress. Currently on sub-stage B1.a:
-real-time voice conversation between the browser and Amazon Nova Sonic
-(via Strands' experimental `BidiAgent`), over a WebSocket. Audio is
-captured in the browser using the Web Audio API and streamed as 16 kHz
-PCM16 to a FastAPI server that holds a bidirectional streaming session
-with Nova Sonic. The CRM tools from Phase A are not yet wired to the
-voice agent — that is B1.b onwards.
+Phase B — Voice channel. Complete (closed at sub-stage B2.4). Real-time
+voice conversation between the browser and Amazon Nova Sonic via
+Strands' experimental `BidiAgent`, with the three CRM tools wired,
+AGUI events flowing through the BFF, and the user view rewritten as a
+voice interface. See `docs/decisions.md` for the full arc (B1.a → B2.4).
 
-Phase C — Telephony. Planned. Integration with Amazon Connect to expose
-Vera over a real phone number.
+Phase C — Multi-industry kit. Complete. The agent is now parameterised
+by industry via `?industry=<name>` in the URL; banking is the only
+industry that ships with a manifest, but the scaffolding (per-industry
+folder with `tools.py`, `prompt.txt`, `vera.yaml`) makes adding another
+one a copy-edit operation. See the "Multi-industry" section below for
+how to add one and `docs/decisions.md` for the architecture rationale.
+
+Future work (unscheduled). Telephony integration with Amazon Connect
+to expose Vera over a real phone number, on top of the existing voice
+stack. Originally planned as Phase C but reassigned when the
+multi-industry work took priority.
 
 Architecture decisions, considered trade-offs and discarded approaches
 are recorded in [`docs/decisions.md`](docs/decisions.md). That file is
@@ -103,6 +110,23 @@ CRM (unchanged)
 
 The Phase B server runs locally for now. Deploying it to Bedrock
 AgentCore Runtime is a later sub-stage.
+
+## Operational layout
+
+A full demo requires four local processes plus the deployed CRM:
+
+| Port | Process               | Required for                                          | Start                                                       |
+|------|-----------------------|-------------------------------------------------------|-------------------------------------------------------------|
+| 8080 | Text agent (`main.py`) | Text-fallback button in `?view=user`; `/metrics` for BFF | `uv run main.py` (in `agent/app/vera/`)                  |
+| 8081 | Bidi voice server     | Voice conversation in `?view=user`                    | `python server.py` (in `agent/app/vera/bidi/`, venv active) |
+| 8787 | BFF (Node + Express)  | All frontend views (event broadcast + `/chat` proxy)  | `npm start` (in `bff/`)                                     |
+| 5173 | Frontend (Vite)       | The UI itself                                         | `npm run dev` (in `frontend/`)                              |
+
+The text agent (`:8080`) is required even for a voice-only demo
+because the text-fallback button is always visible in `?view=user`
+and posts to it through the BFF. A missing `:8080` fails with no
+visible UI feedback (errors land in the BFF log and the browser
+console only).
 
 ## Components
 
@@ -213,7 +237,7 @@ a tech-log stream, and an admin panel, but do not currently react to
 live conversation events — wiring them to the AGUI broadcast from
 the BFF is tracked as separate future work, not part of Phase B.
 
-## Running Phase B (up to B2.2)
+## Running Phase B (closed at B2.4)
 
 Phase B keeps the Phase A processes running and adds the bidi voice
 server. The bidi server uses the same Python virtual environment as
@@ -256,6 +280,42 @@ Known caveats (tracked for future work):
 
 The standalone HTML at `agent/app/vera/bidi/index.html` from B1.a was
 removed in B2.4 cleanup. The voice UI now lives only in PatientScreen.
+
+## Multi-industry
+
+The agent picks its tools, prompt and voice settings from a per-
+industry manifest at session start. The active industry is selected
+via the `industry` query parameter at every layer:
+
+- Frontend:    `http://localhost:5173/vera-pitch/?view=user&industry=banking`
+- Bidi WS:     `ws://localhost:8081/ws?industry=banking`
+- Text agent:  `http://localhost:8080/invocations?industry=banking`
+- BFF `/chat`: POST body `{"message": "...", "industry": "banking"}`
+
+The default at every layer is `banking`, so links without the param
+keep working as before.
+
+Unknown industry: the voice WS closes with code 4404 and a JSON error
+frame; the text path returns 502. Neither produces a visible UI signal
+yet — listed in `docs/decisions.md` as deferred UX.
+
+To add a new industry, copy `agent/app/vera/industries/banking/` to
+`agent/app/vera/industries/<name>/` and edit:
+
+- `tools.py` — `@tool`-decorated functions for this industry's
+  domain. The names you export here must match what the manifest
+  lists.
+- `vera.yaml` — the manifest: list the tool names, point to the
+  prompt file, set voice/text model IDs, set `thread_id_prefix`.
+- `prompt.txt` — the system prompt.
+
+Restart the bidi server and the text agent. The new industry becomes
+selectable via `?industry=<name>`. See `agent/app/vera/industries/banking/`
+as the canonical example.
+
+The three monitoring views (`?view=flow`, `?view=logs`, `?view=admin`)
+render a placeholder for non-banking industries — they are wired to
+banking-specific mocks only.
 
 ## Cost estimate
 

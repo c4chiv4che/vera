@@ -275,3 +275,62 @@ The technical wiring was the small part. The bulk of B1.b turned out to be promp
 - Investigate AudioWorklet to close the fluidity gap against the standalone HTML.
 - Agent-as-config refactor for multi-industry reproducibility.
 - B3: deploy to AgentCore Runtime (requires Docker on the dev host).
+
+
+## 2026-06 — Phase C: multi-industry kit (banking → manifest-driven loader)
+
+**Context.** The sponsor reproducibility goal — "a future SA can `terraform apply` this kit and adapt it to their own customer" — needs the agent to be parameterised by industry, not hardcoded to banking. Phase A and B shipped a single banking agent with the prompt, tools, and voice settings inlined across `main.py` and `bidi/server.py`. Phase C lifts those into per-industry manifests on disk and routes incoming sessions to the right one based on a query-string parameter. Banking remains the only industry that ships with a manifest; the scaffolding makes adding another one a copy-edit operation.
+
+**Architecture decisions (made up front, not revisited mid-flight).**
+
+1. *Multi-tenant single process.* The bidi server and text agent each run as one process and instantiate the right `BidiAgent` / `StrandsAgent` on-demand per incoming session. Not one process per industry — that would multiply the operational surface (more ports to start, more env to manage) for a demo where no two industries ever run at the same time.
+2. *Industry via WebSocket / HTTP query string.* `?industry=<name>`. Default at every layer (frontend, BFF, both agents) is `banking`, so existing links and the current frontend remain functional without any caller passing the parameter.
+3. *Same query-string contract for the frontend URL.* `?view=user&industry=banking`; the frontend reads it once at mount and threads it down to `useVoiceSession` and into `AgentContext`'s `/chat` POST body.
+4. *Tools and prompt per industry.* Each industry is `agent/app/vera/industries/<name>/` with `tools.py` (Python module exporting `@tool` callables), `prompt.txt`, and `vera.yaml` (manifest listing tool names, voice/text model IDs, thread ID prefix). One `agent_loader.load_industry(name)` reads the yaml and returns a typed `IndustryConfig`. The loader has no cache: re-reading a small yaml plus prompt on every WebSocket session is free, and lets us iterate on `prompt.txt` without restarting the server.
+5. *BFF unchanged structurally.* The BFF still proxies `/chat` to the text agent and broadcasts AGUI events from the bidi server to all monitor clients. The only changes: `/chat` reads `industry` from the request body (default `banking`) and appends `?industry=` to the URL it hits on the text agent. Thread IDs in voice sessions now carry the manifest's `thread_id_prefix` (e.g. `banking-voice-<hex>`), observable in BFF logs.
+6. *Monitoring views show a placeholder for non-banking industries.* The three monitoring views (`?view=flow`, `?view=logs`, `?view=admin`) render hardcoded banking-themed mocks (Phase A). For `industry != banking` they now render a shared `<IndustryPlaceholder>` body inside the same screen chrome, so the header keeps working and the user retains context of which view they're in.
+
+**What shipped (9 commits on `phase-c/n3-multi-industry`).**
+
+- `cc76e73` — refactor(agent): extract banking industry into `industries/banking/`
+- `c61e67e` — feat(agent): bidi resolves industry from `?industry=` via manifest loader
+- `16e15b3` — feat(agent): text agent resolves industry from `?industry=` via manifest loader
+- `7063d7d` — feat(bff): propagate `?industry=` from `/chat` body to the text agent
+- `fa8909c` — feat(frontend): propagate `?industry=` from URL to bidi WS and BFF `/chat`
+- `a319cb7` — fix(frontend): drop unused destructured var in FlowScreen
+- `7425d66` — fix(frontend): text fallback blocked by voice's RUN_STARTED via isRunning
+- `ff4cf43` — refactor(frontend): extract AgentContext + useAgent into useAgent.js
+- `8911d83` — feat(frontend): placeholder in the 3 monitoring views when industry != banking
+
+Operational: the README now documents the 4 processes that a full demo requires (text agent :8080, bidi voice :8081, BFF :8787, frontend :5173) with their purpose. During Phase C this was easy to forget — a missing :8080 produces no UI signal, only console logs.
+
+**Operating rule that came out of this phase (NEW, project-wide).**
+
+No user input is silently dropped. Every guard, debounce, swallow-catch in a code path that handles a user-initiated action (submit, click, voice/audio event, WebSocket message) must `console.warn`/`console.error`/surface visibly. The minimum is a log line; a visible UI affordance is the better long-term form. Silent early-returns are forbidden in those paths.
+
+Trigger: `7425d66` fixed a `sendMessage` early-return that silently dropped text submissions during voice sessions (the guard `if (... || isRunning) return;` was firing because voice's `RUN_STARTED` set `isRunning=true` and never reset until the user clicked "terminar llamada"). Total cost: ~1-2 hours within a single session, two false hypotheses chased (HMR stale browser, HMR stale dev server) before the right diagnosis landed. A single `console.warn` in the guard would have closed the diagnostic in minutes — the symptom was indistinguishable from "nothing happened."
+
+**Deferred / known limitations (Phase C explicitly does NOT fix).**
+
+Backend / agents:
+- `AGUIBridge.emit` in `bidi/server.py` silently drops events if its WS to the BFF isn't connected yet (the `await asyncio.sleep(0.3)` race before `emit_run_started()`). Same silent-drop pattern as the fixed `sendMessage`; lower priority because no user-facing input is affected, but worth eliminating per the new rule.
+- `DEMO_THREAD_ID = "vera-demo"` is shared across industries; the text agent's `/metrics/{thread_id}` does cross-industry lookup, so two industries hitting the BFF simultaneously would mix their token/latency counts. Single-user demo assumption inherited from Phase B, not worsened by Phase C.
+
+Frontend UX:
+- Invalid industry (`?industry=xxx`) closes the voice WS with code 4404 and a JSON error frame — the hook's `onmessage` only processes `type: "audio"` and drops the rest, then `onclose` flips state to `"ended"`; user sees "llamada finalizada" without explanation. Text equivalent: BFF returns 502, AgentContext logs ERROR silently. Same UI feedback gap.
+- Text-fallback "message dropped: send in flight" now logs (per the rule), but doesn't visually disable the submit button or echo the dropped attempt. The visible UX is the proper follow-up.
+- Agent-down (ECONNREFUSED on :8080) is logged on the BFF side (`broadcast({type: "ERROR", detail: ...})`) and on the browser console (AgentContext's ERROR handler), but no visible UI state changes. Originally observed as "BFF silent fail" — re-verified during Phase C: not silent, but invisible to the user.
+
+Conversation model:
+- Voice and text are separate conversations with separate memory (different thread IDs, different agent instances on the text-agent side, no shared state on the bidi side). Cross-channel continuity is future work.
+
+Monitoring views:
+- `flow/logs/admin` remain Phase A mocks. Commit `8911d83` only adds an "industry mismatch" placeholder for non-banking; it does NOT make them consume real AGUI events. Wiring them to the live broadcast is its own feature project, not Phase C cleanup.
+
+Operational:
+- Text agent (:8080) is required even for a voice-only demo because the text-fallback button is always present in `?view=user` and hits `/chat`. Documented in the README's operational table; a future cleanup could hide the button when :8080 is unreachable.
+
+Process discipline:
+- Two debugging detours in this phase, both on the same bug: chased HMR-stale-browser (false), then HMR-stale-dev-server (false), before identifying the `isRunning` guard. Both detours were ruled out by user-driven experiments rather than code analysis — the bug was in user-visible behaviour that no headless reproduction surfaced without a real browser. Wrote the silent-drop rule afterwards so the next instance of this pattern fails loud.
+
+**Status.** Phase C closed. Branch `phase-c/n3-multi-industry` ready to merge to `main`. The original "Phase C — Telephony" (Amazon Connect integration over the existing voice agent) loses its phase number and moves to unscheduled future work; the Phase C label belongs to the multi-industry kit now.
