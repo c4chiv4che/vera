@@ -22,6 +22,7 @@ export function AgentProvider({ children }) {
   const [veraStatus, setVeraStatus] = useState("idle");
   const [toolCalls, setToolCalls] = useState([]);
   const [events, setEvents] = useState([]);
+  const [traceLog, setTraceLog] = useState([]);
   const [conversationState, setConversationState] = useState("idle");
   const [isRunning, setIsRunning] = useState(false);
   const [connected, setConnected] = useState(false);
@@ -29,6 +30,9 @@ export function AgentProvider({ children }) {
 
   const streamingRef = useRef({ id: null, text: "" });
   const wsRef = useRef(null);
+  // Monotonic, independent of array length so future filtering can't
+  // duplicate seq numbers. Reset alongside traceLog on RESET.
+  const traceSeqRef = useRef(0);
   // Debounce in-flight text submits without coupling to `isRunning`, which
   // is set by RUN_STARTED from ANY agent run — including the voice session
   // — and would silently block text fallback for the entire voice call.
@@ -39,11 +43,27 @@ export function AgentProvider({ children }) {
     setEvents((prev) => [...prev, { ts, type, detail }]);
   }, []);
 
+  // Append a new entry to traceLog. seq is monotonic; ts in es-AR clock format.
+  const pushTrace = useCallback((entry) => {
+    const seq = ++traceSeqRef.current;
+    const ts = new Date().toLocaleTimeString("es-AR", { hour12: false });
+    setTraceLog((prev) => [...prev, { seq, ts, ...entry }]);
+  }, []);
+
+  // Coalescing update for streaming entries (assistant_message content, tool_call
+  // args/result). Predicate matches the open entry; patch is a partial overlay.
+  // For deltas that depend on previous value (args), callers can use setTraceLog
+  // directly with a map — see TOOL_CALL_ARGS below.
+  const updateTrace = useCallback((predicate, patch) => {
+    setTraceLog((prev) => prev.map((e) => (predicate(e) ? { ...e, ...patch } : e)));
+  }, []);
+
   const handleEvent = useCallback((event) => {
     switch (event.type) {
       case "USER_MESSAGE":
         // The BFF owns the conversation; it tells us when a user message is registered
         setMessages((prev) => [...prev, { id: event.message.id, role: "user", content: event.message.content }]);
+        pushTrace({ type: "user_message", messageId: event.message.id, content: event.message.content });
         break;
 
       case "RESET":
@@ -52,6 +72,8 @@ export function AgentProvider({ children }) {
         setVeraStatus("idle");
         setToolCalls([]);
         setEvents([]);
+        setTraceLog([]);
+        traceSeqRef.current = 0;
         setConversationState("idle");
         setIsRunning(false);
         streamingRef.current = { id: null, text: "" };
@@ -61,12 +83,14 @@ export function AgentProvider({ children }) {
         setConversationState("active");
         setIsRunning(true);
         logEvent("RUN_STARTED", `thread=${event.threadId}`);
+        pushTrace({ type: "run_started", threadId: event.threadId, runId: event.runId });
         break;
 
       case "TEXT_MESSAGE_START":
         streamingRef.current = { id: event.messageId, text: "" };
         setVeraStatus("speaking");
         setMessages((prev) => [...prev, { id: event.messageId, role: "assistant", content: "" }]);
+        pushTrace({ type: "assistant_message", messageId: event.messageId, content: "", status: "streaming" });
         break;
 
       case "TEXT_MESSAGE_CONTENT": {
@@ -74,12 +98,18 @@ export function AgentProvider({ children }) {
         const text = streamingRef.current.text;
         const id = streamingRef.current.id;
         setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, content: text } : m)));
+        updateTrace((e) => e.type === "assistant_message" && e.messageId === id, { content: text });
         break;
       }
 
-      case "TEXT_MESSAGE_END":
+      case "TEXT_MESSAGE_END": {
+        // Capture messageId BEFORE setState callbacks fire — predicate must
+        // not read mutable ref state that a future case could change.
+        const id = streamingRef.current.id;
         setVeraStatus("idle");
+        updateTrace((e) => e.type === "assistant_message" && e.messageId === id, { status: "done" });
         break;
+      }
 
       case "TOOL_CALL_START":
         setVeraStatus("thinking");
@@ -88,11 +118,28 @@ export function AgentProvider({ children }) {
           { id: event.toolCallId, name: event.toolCallName, args: "", result: null, status: "running" },
         ]);
         logEvent("TOOL_CALL_START", `name=${event.toolCallName}`);
+        pushTrace({
+          type: "tool_call",
+          toolCallId: event.toolCallId,
+          toolName: event.toolCallName,
+          args: "",
+          result: null,
+          status: "running",
+        });
         break;
 
       case "TOOL_CALL_ARGS":
         setToolCalls((prev) =>
           prev.map((t) => (t.id === event.toolCallId ? { ...t, args: t.args + event.delta } : t))
+        );
+        // Delta accumulation — must read previous value, so map inline rather
+        // than calling updateTrace (which only supports static patches).
+        setTraceLog((prev) =>
+          prev.map((e) =>
+            e.type === "tool_call" && e.toolCallId === event.toolCallId
+              ? { ...e, args: e.args + event.delta }
+              : e
+          )
         );
         break;
 
@@ -106,6 +153,10 @@ export function AgentProvider({ children }) {
           prev.map((t) => (t.id === event.toolCallId ? { ...t, result: parsed, status: "done" } : t))
         );
         logEvent("TOOL_CALL_RESULT", event.content?.slice(0, 80));
+        updateTrace(
+          (e) => e.type === "tool_call" && e.toolCallId === event.toolCallId,
+          { result: parsed, status: "done" }
+        );
         if (parsed && parsed.decision && parsed.decision !== "aprobado") {
           setConversationState("escalated");
         }
@@ -117,6 +168,7 @@ export function AgentProvider({ children }) {
         setVeraStatus("idle");
         setConversationState((s) => (s === "escalated" ? "escalated" : "resolved"));
         logEvent("RUN_FINISHED", `thread=${event.threadId}`);
+        pushTrace({ type: "run_finished", threadId: event.threadId });
         break;
 
       case "METRICS":
@@ -127,18 +179,36 @@ export function AgentProvider({ children }) {
           latencyMs: event.latencyMs,
         });
         logEvent("METRICS", `tokens=${event.totalTokens} latency=${event.latencyMs}ms`);
+        pushTrace({
+          type: "metrics",
+          inputTokens: event.inputTokens,
+          outputTokens: event.outputTokens,
+          totalTokens: event.totalTokens,
+          latencyMs: event.latencyMs,
+        });
         break;
 
       case "ERROR":
         setIsRunning(false);
         setVeraStatus("idle");
         logEvent("ERROR", event.detail);
+        pushTrace({ type: "error", detail: event.detail });
+        break;
+
+      case "STATE_SNAPSHOT":
+      case "MESSAGES_SNAPSHOT":
+        // Periodic full-state syncs the agent runtime emits each turn (text
+        // path). Useful for late-joining WS clients but noise for the trace
+        // graph. Keep the legacy logEvent call so events[] stays byte-equivalent
+        // to pre-change behavior; intentionally skip pushTrace.
+        logEvent(event.type, "");
         break;
 
       default:
         logEvent(event.type, "");
+        pushTrace({ type: "unknown", originalType: event.type, raw: event });
     }
-  }, [logEvent]);
+  }, [logEvent, pushTrace, updateTrace]);
 
   // Connect to the BFF WebSocket on mount
   useEffect(() => {
@@ -198,7 +268,7 @@ export function AgentProvider({ children }) {
 
   const value = {
     metrics,
-    messages, veraStatus, toolCalls, events, conversationState, isRunning, connected,
+    messages, veraStatus, toolCalls, events, traceLog, conversationState, isRunning, connected,
     sendMessage, reset,
   };
 
