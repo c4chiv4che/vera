@@ -439,3 +439,201 @@ the false claims and describe what the views actually do. The
 deferred "wire three views" line in the B2.2 / B2.3 + B2.4 / Phase C
 entries is *not* edited — the chronology is preserved, and this entry
 is the authoritative correction.
+
+
+## 2026-06 — Trace view: live agentic-loop graph in vista 02 (toggle next to the architecture map)
+
+**Context.** The Phase A map in `?view=flow` is an architecture diagram
+with fixed topology: identificar → bedrock → perfil/evaluar →
+responder. Nodes light up as the live conversation touches them and
+the tool-result overlays show real CRM data, but the shape never
+changes. What it cannot show is what only exists at runtime: the
+agentic loop unrolled — Bedrock appearing once per iteration, with
+each Bedrock output being either a tool call or the final text
+response, in the order they actually happened during this specific
+call. The map answers "what services are wired"; the trace answers
+"what did the model decide, step by step, this turn".
+
+**Decision.** Add a "Mapa | Trace" pill toggle inside FlowScreen
+(vista 02). Map view stays unchanged as the architecture reference.
+Trace view is a ReactFlow horizontal graph built live from a new
+`traceLog` array in `AgentContext`, with one node per loop step
+(`Usuario → Bedrock razona → Tool → Resultado → Bedrock razona →
+Respuesta`). Banking-only for now; non-banking still shows the
+multi-industry placeholder and the toggle is hidden.
+
+**Specific design choices within this decision.**
+
+- *traceLog inside AgentContext, not a new WS subscription from the
+  Trace view itself.* The AgentProvider mounts at the React root
+  (`main.jsx`) and listens to the BFF WebSocket since page-load. The
+  WS broadcaster has no replay — a fresh WS opened on Trace mount
+  would arrive empty if the user navigates into Trace mid-call (the
+  real demo case). Putting `traceLog` in AgentContext accumulates
+  from the first event regardless of which view is visible. This
+  also avoids a duplicated WS per session. The B alternative (Trace
+  opens its own WS) was rejected for both reasons.
+
+- *Coalesce streaming deltas into the open entry, no cap.* A naive
+  raw log would push one entry per `TEXT_MESSAGE_CONTENT` delta
+  (decades per assistant turn). The graph renders one node per
+  message regardless of delta count, so storing each delta is
+  wasted memory plus wasted recomputation in `useMemo`. The
+  alternative — raw with FIFO cap — silently drops the *head* of
+  the log first, which is exactly the most demo-valuable section
+  (the first "Usuario pregunta → Bedrock razona"). Silent drops
+  also violate the project-wide rule from Phase C (no silent
+  loss of user-attributable state). Coalescing keeps growth tied
+  to the unit that matters — iterations — and matches the existing
+  pattern in `setMessages` for the same deltas.
+
+- *STATE_SNAPSHOT and MESSAGES_SNAPSHOT get explicit no-op cases.*
+  The text agent emits both per turn for late-joining WS clients.
+  Letting them fall through to the `default` case would add two
+  `'unknown'` entries to `traceLog` every text turn. An explicit
+  `case STATE_SNAPSHOT: case MESSAGES_SNAPSHOT: logEvent(...)` keeps
+  `events[]` byte-equivalent to pre-change (the legacy `logEvent`
+  call is preserved) while skipping `pushTrace`. Documented inline
+  in `AgentContext.jsx` so future readers don't conclude it was an
+  oversight.
+
+- *Run semantics differ between voice and text; the trace anchors
+  on USER_MESSAGE, not RUN_STARTED.* Text emits one AGUI run per
+  HTTP turn; voice emits one AGUI run per WebSocket session (many
+  turns). Labeling visual blocks "Turn N" would always show "1" in
+  voice and grow per POST in text — inconsistent. The session chip
+  uses the first `run_started`'s threadId to label "sesión voz" vs
+  "sesión texto" (text is the BFF constant `"vera-demo"`, voice is
+  `banking-voice-<hex>` per the bidi manifest's `thread_id_prefix`).
+  Inside the trace, the natural turn boundary is each new
+  `user_message`, not `run_started`.
+
+- *Tool nodes carry an architecture sublabel ("Lambda · DynamoDB")
+  duplicated from the map's `NODES[].svc`.* The real source of
+  truth for "what infrastructure each tool runs on" is the per-
+  industry agent manifest in `agent/app/vera/industries/<name>/`,
+  not the frontend. Surfacing that to the frontend is a separate
+  decision (probably part of the agent-as-config follow-up). Three
+  lines of duplication today is cheaper than premature
+  centralisation; if/when the mapping is exposed by the manifest,
+  the duplicated map in `traceGraphBuild.js` is replaced by a read,
+  not refactored.
+
+- *Message nodes are bare (just `Usuario` / `Respuesta`), tool and
+  result nodes keep their data.* The trace is meant to be visual
+  proof that the agent ran, not a transcript: the words live in the
+  Conversación view. The demo value of the trace is the
+  *parameters Bedrock extracted* (args JSON in the tool node) and
+  the *decision the CRM returned* (decision + DTI in the result
+  node) — those stay.
+
+- *Horizontal flow, no zoom.* Vertical was the first cut and felt
+  cramped given each iteration produces 2-3 stacked nodes; horizontal
+  reads as "the loop unfolds left to right" and the chip stays
+  legibly centered at top. ReactFlow zoom is locked at 1 (per the
+  original scope "SIN zoom elaborado") and the auto-pan moves the
+  viewport in X to keep the last node visible (~70% across).
+
+**The 0-height bug we fixed mid-implementation (and the lesson).**
+
+First runtime test of the Trace view rendered the session chip
+correctly but zero nodes on the canvas. Console flooded with
+"The React Flow parent container needs a width and a height to
+render the graph" (223 times in one session). Root cause: the Trace
+wrapper used `flex-1 relative` inside the page-root's
+`min-h-screen flex flex-col`. With short sibling content (header +
+reset button), the column had no surplus to distribute, so `flex-1`
+resolved to 0px. ReactFlow's mount-time measurement saw a 0-height
+parent and refused to render anything inside it. The chip was
+visible because it's absolutely positioned with `z-10` over the
+collapsed wrapper. Fix: `relative h-[74vh]`, mirroring the SVG
+map's existing 74vh visual rhythm. Explicit > computed for any
+child of a `min-h-screen` column with short content.
+
+Lesson recorded: *"flex-1" only distributes when there's surplus
+to distribute.* The map worked because its SVG had its own 74vh
+max-height that imposed dimension regardless of flex math; the
+trace's ReactFlow wrapper had no such anchor. Verification went
+from "chip visible, canvas empty" to "chip visible, 11 nodes
+visible, wrapper clientHeight 616px (74vh on 832px viewport),
+zero React Flow height warnings" once the wrapper got an explicit
+height. The bug class is the same as the original Phase C silent-
+drop rule: a problem that looked silent (no nodes) was actually
+loud (223 console errors that nobody had checked yet). User-side
+behavioural evidence (chip visible, canvas blank) → console
+inspection → root cause in two iterations.
+
+**Open question, intentionally deferred.**
+
+Whether the Mapa and Trace should eventually merge into a single
+*combined* view — a fixed architecture strip on top showing which
+tools/services are wired, with the live trace flowing below — is
+recorded here as a documented candidate for the future but not
+committed to. The decision to evaluate is conditional on real
+demo experience: if a sponsor reading the trace also wants the
+architectural context in the same glance, the combined view earns
+its complexity; if they consistently want one OR the other, the
+toggle stays. Today both views live side by side in vista 02
+behind a toggle, both consume the same `useAgent()` context, both
+are stable; no premature merge.
+
+**Verified.** Cross-cutting verification covered both the data
+path and the layout path:
+
+- Node-side fixture test of `buildGraph` (extracted to
+  `traceGraphBuild.js` so `TraceGraph.jsx` exports only React
+  components, mirroring the `useAgent.js` ↔ `AgentContext.jsx`
+  split): 14/14 assertions on a synthetic 6-entry traceLog (xs
+  monotonic, ys constant at `NODE_Y = 200`, message subtitles
+  empty, tool args + arch preserved, result DTI preserved, col
+  step = 320, x_start = 40).
+- Playwright against the live dev server seeded with the same
+  synthetic traceLog through a `?trace-seed=demo` URL flag (stripped
+  before commit per the explicit grep + diff check requirement):
+  wrapper clientHeight = 616px, 11 ReactFlow nodes rendered, four
+  "Bedrock razona" instances, "Resultado · derivado" present, zero
+  React-Flow height warnings.
+- Manual end-to-end against the real CRM (voice session with DNI
+  31234567 → Laura Fernández → 20.000 USD → derivado): Mapa shows
+  the same lit-node sequence as before (regression cero), Trace
+  shows the unrolled loop in horizontal order, session chip reads
+  "sesión voz · banking-voice-<hex>", auto-pan keeps the latest
+  node visible as the conversation progresses.
+
+**Trade-offs accepted.**
+
+- *Horizontal row with same y for all nodes leaves a "ragged"
+  bottom edge*: nodes with subtitle (tool, result) are visibly
+  taller than bare nodes (Usuario, Bedrock, Respuesta). Smoothstep
+  edges absorb the misalignment cleanly. Accepted for v1; if a
+  real demo viewer flags it, the fix is measuring each node's
+  height post-mount and snapping to a shared vertical center — not
+  a layout overhaul.
+- *Mapa stays alongside Trace pending demo evidence*: see the
+  open question above. Operational cost is a second render path in
+  vista 02 that needs to stay healthy.
+- *Architecture sublabel mapping duplicated in
+  `traceGraphBuild.js`*: see the design-choices entry above.
+- *No persistence of traceLog across page reloads*: the log lives
+  in React state; refreshing during a demo loses the history of
+  that session. Same property as `messages` and `toolCalls` —
+  acceptable per the original scope ("trace de la sesión actual en
+  vivo. SIN persistencia, SIN export").
+- *No retroactive view of pre-mount events*: a fresh page-load
+  during an in-flight call sees only events from the moment
+  AgentContext mounted forward — same WS-no-replay constraint that
+  killed the alternative architecture. The risk is acknowledged;
+  in the demo path the page is open before any call begins.
+
+**Branch.** `feature/trace-view`, four commits:
+
+- `2235981` — feat(frontend): traceLog in AgentContext for ordered
+  agentic loop reconstruction
+- `802752f` — feat(frontend): Trace toggle in FlowScreen — live
+  agentic-loop graph
+- `823b5e2` — fix(frontend): give TraceGraph wrapper an explicit
+  height so ReactFlow renders
+- `36fbb9c` — feat(frontend): polish trace — horizontal flow, bare
+  messages, tool arch sublabel
+
+**Status.** Closed. Merged to `main`.

@@ -235,7 +235,12 @@ views react live to the AGUI broadcast from the BFF: `?view=flow`
 lights up its `identificar` / `bedrock` / `perfil` / `evaluar` nodes
 in real time as the agent fires the matching tools (the `voz` /
 `transcribir` / `responder` nodes are intentional placeholders for
-the future Connect stage); `?view=logs` streams real AGUI events
+the future Connect stage) and exposes a "Mapa | Trace" toggle in
+the header — Trace is a horizontal ReactFlow graph of the unrolled
+agentic loop for the current session (`Usuario → Bedrock razona →
+Tool → Resultado → Bedrock razona → Respuesta`), built live from a
+`traceLog` accumulated in `AgentContext` since page-load (no
+persistence, no replay across reloads); `?view=logs` streams real AGUI events
 including tool results; `?view=admin` is a hybrid — a live "Vera"
 agent and a real contact card (customer name from
 `identificar_cliente`, state derived from running tools and
