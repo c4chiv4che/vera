@@ -12,10 +12,10 @@ import { buildGraph } from './traceGraphBuild'
 const NODE_WIDTH = 280
 
 function TraceNode({ data }) {
-  const { title, subtitle, colors, pulsing } = data
+  const { title, subtitle, arch, colors, pulsing } = data
   return (
     <>
-      <Handle type="target" position={Position.Top} style={{ background: colors.border, width: 6, height: 6, border: 'none' }} />
+      <Handle type="target" position={Position.Left} style={{ background: colors.border, width: 6, height: 6, border: 'none' }} />
       <div style={{
         background: colors.bg,
         border: `1px solid ${colors.border}`,
@@ -28,13 +28,18 @@ function TraceNode({ data }) {
         transition: 'box-shadow 200ms ease',
       }}>
         <div style={{ fontWeight: 500 }}>{title}</div>
+        {arch && (
+          <div style={{ fontSize: 10, opacity: 0.55, marginTop: 2, letterSpacing: '0.5px' }}>
+            {arch}
+          </div>
+        )}
         {subtitle && (
           <div style={{ fontSize: 11, opacity: 0.75, marginTop: 4, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
             {subtitle}
           </div>
         )}
       </div>
-      <Handle type="source" position={Position.Bottom} style={{ background: colors.border, width: 6, height: 6, border: 'none' }} />
+      <Handle type="source" position={Position.Right} style={{ background: colors.border, width: 6, height: 6, border: 'none' }} />
     </>
   )
 }
@@ -59,16 +64,16 @@ function TraceGraphInner({ traceLog }) {
   const { nodes, edges } = useMemo(() => buildGraph(traceLog), [traceLog])
   const session = useMemo(() => sessionLabel(traceLog), [traceLog])
 
-  // Pan downward as new nodes arrive so the latest is in view, without ever
+  // Pan rightward as new nodes arrive so the latest is in view, without
   // changing zoom (per scope: "SIN zoom elaborado"). Re-rendering an existing
   // entry (delta coalescing into an open assistant_message) shouldn't yank
   // the viewport — so deps intentionally ignore `nodes` and key on length.
   useEffect(() => {
     if (!containerRef.current || nodes.length === 0) return
-    const h = containerRef.current.clientHeight || 600
-    const lastY = nodes[nodes.length - 1].position.y
-    const targetY = Math.min(0, h * 0.7 - lastY)
-    setViewport({ x: 0, y: targetY, zoom: 1 }, { duration: 350 })
+    const w = containerRef.current.clientWidth || 1200
+    const lastX = nodes[nodes.length - 1].position.x
+    const targetX = Math.min(0, w * 0.7 - lastX)
+    setViewport({ x: targetX, y: 0, zoom: 1 }, { duration: 350 })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodes.length, setViewport])
 
