@@ -67,7 +67,7 @@ const VOICE_LABELS = {
 }
 
 function PatientScreen({ go, industry }) {
-  const { messages, veraStatus, sendMessage, reset } = useAgent()
+  const { messages, veraStatus, sendMessage, reset, textInFlight } = useAgent()
   const [started, setStarted] = useState(false)
   const { state: voiceState, error: voiceError, end: endVoice } = useVoiceSession({
     url: 'ws://localhost:8081/ws',
@@ -151,6 +151,22 @@ function PatientScreen({ go, industry }) {
               const who = m.role === 'assistant' ? 'vera' : 'user'
               return <Bubble key={m.id} who={who} opacity={opacity}>{m.content}</Bubble>
             })}
+            {/* Typing indicator: shown only on the text path while Vera
+                is processing but hasn't started streaming text yet.
+                Once TEXT_MESSAGE_START sets veraStatus to 'speaking',
+                the streaming bubble carries the visual instead. */}
+            {textFallback && textInFlight && veraStatus !== 'speaking' && (
+              <div className="flex justify-start">
+                <div className="max-w-[80%] px-4 py-3 rounded-2xl text-[15px] bg-slate-800/70 text-slate-200 rounded-bl-sm">
+                  <span className="block text-[10px] uppercase tracking-wider mb-1 text-violet-400/60">Vera</span>
+                  <span className="inline-flex gap-1 items-center">
+                    <span className="w-1.5 h-1.5 rounded-full bg-slate-400 animate-pulse" style={{ animationDelay: '0ms' }} />
+                    <span className="w-1.5 h-1.5 rounded-full bg-slate-400 animate-pulse" style={{ animationDelay: '150ms' }} />
+                    <span className="w-1.5 h-1.5 rounded-full bg-slate-400 animate-pulse" style={{ animationDelay: '300ms' }} />
+                  </span>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -164,11 +180,13 @@ function PatientScreen({ go, industry }) {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') submitText() }}
-              placeholder="Escribí tu mensaje…"
-              className="flex-1 text-[15px] px-4 py-2.5 rounded-full border border-slate-700 bg-slate-800/60 text-slate-100 placeholder:text-slate-500 outline-none focus:border-slate-500 transition-colors"
+              placeholder={textInFlight ? 'Vera está procesando…' : 'Escribí tu mensaje…'}
+              disabled={textInFlight}
+              className="flex-1 text-[15px] px-4 py-2.5 rounded-full border border-slate-700 bg-slate-800/60 text-slate-100 placeholder:text-slate-500 outline-none focus:border-slate-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             />
             <button onClick={submitText}
-              className="shrink-0 text-sm px-5 py-2.5 rounded-full border border-slate-600 text-white bg-slate-800/60 hover:bg-slate-700/60 transition-colors">
+              disabled={!input.trim() || textInFlight}
+              className="shrink-0 text-sm px-5 py-2.5 rounded-full border border-slate-600 text-white bg-slate-800/60 hover:bg-slate-700/60 transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-slate-800/60">
               enviar
             </button>
           </div>

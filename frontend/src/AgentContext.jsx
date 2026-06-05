@@ -1,5 +1,6 @@
 import { useRef, useState, useEffect, useCallback } from "react";
 import { AgentContext } from "./useAgent";
+import { reconcileEcho } from "./messageReconcile";
 
 const BFF_HTTP = "http://localhost:8787";
 const BFF_WS = "ws://localhost:8787";
@@ -27,6 +28,13 @@ export function AgentProvider({ children }) {
   const [isRunning, setIsRunning] = useState(false);
   const [connected, setConnected] = useState(false);
   const [metrics, setMetrics] = useState(null);
+  // True from the moment the user submits a text until the matching
+  // RUN_FINISHED (threadId="vera-demo") or ERROR arrives. UI uses it to
+  // disable the input/button and show a typing indicator. INTENTIONALLY
+  // not gated on the generic isRunning — voice's RUN_STARTED would
+  // otherwise lock text fallback for the entire call (the bug fixed in
+  // 7425d66).
+  const [textInFlight, setTextInFlight] = useState(false);
 
   const streamingRef = useRef({ id: null, text: "" });
   const wsRef = useRef(null);
@@ -37,6 +45,26 @@ export function AgentProvider({ children }) {
   // is set by RUN_STARTED from ANY agent run — including the voice session
   // — and would silently block text fallback for the entire voice call.
   const textBusyRef = useRef(false);
+  // FIFO of {content, ts} for messages just submitted via sendMessage but
+  // whose USER_MESSAGE broadcast from the BFF hasn't arrived yet.
+  // reconcileEcho matches the head against incoming USER_MESSAGE to avoid
+  // duplicating the bubble. Cleared on RESET.
+  const pendingEchoesRef = useRef([]);
+  // Mirror of `messages` so reconcileEcho (called from the WS handler) can
+  // read the latest array synchronously without a stale-closure hazard.
+  // Updated by the effect below after every commit.
+  const messagesRef = useRef([]);
+  // 30s backstop that releases textInFlight if neither RUN_FINISHED nor
+  // ERROR arrives (e.g. BFF crashed mid-run). Cleared whenever those
+  // events fire normally.
+  const textInFlightTimeoutRef = useRef(null);
+
+  // Keep messagesRef in sync after every render commit so the WS handler
+  // can pass the latest array into reconcileEcho without needing to read
+  // from a setState callback (which would deopt other update paths).
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
 
   const logEvent = useCallback((type, detail) => {
     const ts = new Date().toLocaleTimeString("es-AR", { hour12: false });
@@ -58,13 +86,32 @@ export function AgentProvider({ children }) {
     setTraceLog((prev) => prev.map((e) => (predicate(e) ? { ...e, ...patch } : e)));
   }, []);
 
+  // Clear the textInFlight backstop timer if armed. Used by every code
+  // path that releases textInFlight normally (RUN_FINISHED text, ERROR,
+  // RESET) so the 30s timer doesn't fire after the fact.
+  const clearTextInFlightTimer = useCallback(() => {
+    if (textInFlightTimeoutRef.current) {
+      clearTimeout(textInFlightTimeoutRef.current);
+      textInFlightTimeoutRef.current = null;
+    }
+  }, []);
+
   const handleEvent = useCallback((event) => {
     switch (event.type) {
-      case "USER_MESSAGE":
-        // The BFF owns the conversation; it tells us when a user message is registered
-        setMessages((prev) => [...prev, { id: event.message.id, role: "user", content: event.message.content }]);
+      case "USER_MESSAGE": {
+        // reconcileEcho dedupes against the local-echo bookkeeping when
+        // the message comes from a recent text submit; otherwise it falls
+        // through to a normal append (voice transcription, foreign client).
+        const reconciled = reconcileEcho({
+          messages: messagesRef.current,
+          pendingEchoes: pendingEchoesRef.current,
+          incoming: event.message,
+        });
+        pendingEchoesRef.current = reconciled.pendingEchoes;
+        setMessages(reconciled.messages);
         pushTrace({ type: "user_message", messageId: event.message.id, content: event.message.content });
         break;
+      }
 
       case "RESET":
         setMessages([]);
@@ -76,6 +123,9 @@ export function AgentProvider({ children }) {
         traceSeqRef.current = 0;
         setConversationState("idle");
         setIsRunning(false);
+        setTextInFlight(false);
+        pendingEchoesRef.current = [];
+        clearTextInFlightTimer();
         streamingRef.current = { id: null, text: "" };
         break;
 
@@ -167,6 +217,14 @@ export function AgentProvider({ children }) {
         setIsRunning(false);
         setVeraStatus("idle");
         setConversationState((s) => (s === "escalated" ? "escalated" : "resolved"));
+        // Only the text path's RUN_FINISHED releases textInFlight — the
+        // voice path also emits RUN_FINISHED but on a different threadId
+        // ("banking-voice-<hex>"), and treating that as "text done" would
+        // re-create the 7425d66 bug from the other direction.
+        if (event.threadId === "vera-demo") {
+          setTextInFlight(false);
+          clearTextInFlightTimer();
+        }
         logEvent("RUN_FINISHED", `thread=${event.threadId}`);
         pushTrace({ type: "run_finished", threadId: event.threadId });
         break;
@@ -191,6 +249,11 @@ export function AgentProvider({ children }) {
       case "ERROR":
         setIsRunning(false);
         setVeraStatus("idle");
+        // BFF broadcasts ERROR when the agent returns 4xx/5xx (Phase C
+        // commit 4). Release textInFlight immediately so the user isn't
+        // locked out for the 30s backstop window.
+        setTextInFlight(false);
+        clearTextInFlightTimer();
         logEvent("ERROR", event.detail);
         pushTrace({ type: "error", detail: event.detail });
         break;
@@ -208,7 +271,7 @@ export function AgentProvider({ children }) {
         logEvent(event.type, "");
         pushTrace({ type: "unknown", originalType: event.type, raw: event });
     }
-  }, [logEvent, pushTrace, updateTrace]);
+  }, [logEvent, pushTrace, updateTrace, clearTextInFlightTimer]);
 
   // Connect to the BFF WebSocket on mount
   useEffect(() => {
@@ -244,6 +307,29 @@ export function AgentProvider({ children }) {
       return;
     }
     textBusyRef.current = true;
+
+    // Local echo: show the user's message immediately under a sentinel
+    // id; reconcileEcho will replace it when the BFF rebroadcasts.
+    const now = Date.now();
+    pendingEchoesRef.current = pendingEchoesRef.current.filter(
+      (e) => now - e.ts < 10_000
+    );
+    pendingEchoesRef.current.push({ content: text, ts: now });
+    const echoId = `echo-${crypto.randomUUID()}`;
+    setMessages((prev) => [
+      ...prev,
+      { id: echoId, role: "user", content: text, _pending: true },
+    ]);
+
+    // Lock the input + show typing indicator until RUN_FINISHED / ERROR.
+    setTextInFlight(true);
+    clearTextInFlightTimer();
+    textInFlightTimeoutRef.current = setTimeout(() => {
+      console.warn("[chat] textInFlight timeout — releasing without RUN_FINISHED");
+      setTextInFlight(false);
+      textInFlightTimeoutRef.current = null;
+    }, 30_000);
+
     try {
       await fetch(`${BFF_HTTP}/chat`, {
         method: "POST",
@@ -253,10 +339,14 @@ export function AgentProvider({ children }) {
       // The user message and all events come back via WebSocket broadcast
     } catch (e) {
       console.error("[chat] failed to send", e);
+      // POST failed before any run started — no broadcast will come;
+      // release immediately rather than waiting on the 30s backstop.
+      setTextInFlight(false);
+      clearTextInFlightTimer();
     } finally {
       textBusyRef.current = false;
     }
-  }, [industry]);
+  }, [industry, clearTextInFlightTimer]);
 
   const reset = useCallback(async () => {
     try {
@@ -269,6 +359,7 @@ export function AgentProvider({ children }) {
   const value = {
     metrics,
     messages, veraStatus, toolCalls, events, traceLog, conversationState, isRunning, connected,
+    textInFlight,
     sendMessage, reset,
   };
 
