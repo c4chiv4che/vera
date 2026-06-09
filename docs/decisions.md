@@ -760,3 +760,61 @@ with a Python smoke against the tools.
 (voice flow against the salud vertical, banking regression cero,
 the cross-isolation probe with Laura's DNI in salud). Will be
 closed after merge.
+
+
+## 2026-06 — Phase D (M0): Connect telephony bridge — architecture spike
+
+**Context.** Business mandate (exclusive priority): callers dial the
+Connect PSTN number (+54, in Secrets/env — never committed) and talk
+to OUR existing custom agent. A separate team is exploring Connect's
+NATIVE Nova Sonic path (Lex + AMAZON.QinConnectIntent + Q in Connect);
+we deliberately take the OTHER path — bridge Connect to our own agent —
+to preserve the Strands/industries/AGUI/trace work from Phases A–C.
+
+**Verified (desk research, official AWS sources).**
+- Mechanism: Connect External Voice Transfer Connector transfers the
+  call to a SIP URI; our SIP/RTP app server bridges audio to Nova Sonic
+  over the Bedrock bidirectional API. Human escalation returns via SIP
+  REFER to a Connect entry point.
+- Ruled out: Connect customer media streaming (Kinesis Video Streams)
+  is one-way (customer audio capture for analysis); cannot inject the
+  agent's voice back into the live call.
+- Deploy target: ECS (host networking) or EC2 — UDP SIP 5060 + RTP
+  10000-20000 + IAM for Bedrock. NOT AgentCore. This corrects the
+  earlier "B3 = deploy to AgentCore" backlog assumption.
+- Official samples exist in Java (mjSIP) and JS (SIP.js), both of which
+  assume the SIP gateway OWNS the Nova Sonic session.
+
+**Open decision (D2) — the fork that determines reuse.**
+Our brain is Python (Strands BidiAgent + industries + tools + AGUI).
+The samples are Java/JS and own Nova Sonic. Options:
+  (a) gateway owns Nova Sonic → rebuild brain in Java/JS, lose reuse.
+      REJECTED unless priorities change (defeats the point of this path).
+  (b1) Python SIP/RTP gateway driving Strands in-process → max reuse,
+       no official sample (highest SIP/RTP risk).
+  (b2) Java/JS gateway piping PCM to the Python bidi over an internal
+       transport → leans on the sample, adds a cross-process audio hop.
+  Leaning b1 if Python SIP/RTP proves tractable, else b2. To be
+  resolved with a small code spike in M1.
+
+**AGUI / trace preservation.** The phone-call trace and monitoring
+views survive ONLY if the Python brain stays in the audio loop (ties
+to D2: option (a) would require re-implementing the AGUI translator in
+Java/JS). Another reason to favor b1/b2.
+
+**Unknowns to validate hands-on (not closable by desk research).**
+- Codec conversion: PSTN/Connect G.711 μ-law 8kHz vs Nova Sonic PCM
+  16kHz — confirm and decide where conversion happens.
+- Whether External Voice Transfer Connector is enabled/configurable
+  in the account (us-east-1) against a self-hosted SIP URI.
+- +54 number constraints for this transfer path.
+- End-to-end latency budget.
+
+**Cost (to estimate before standing anything up).** Recurring:
+Connect number (daily) + Connect/transfer per-minute + Nova Sonic
+per-minute audio + ECS running 24/7. Build-but-don't-deploy / on-demand
+options to be offered before any always-on resource is created.
+
+**Status.** M0 closed (architecture understood, path chosen at the
+high level, D2 pending a code spike). No infra, no cost incurred.
+Next: resolve D2 via M1 spike. Telephony bridge = Phase D.
