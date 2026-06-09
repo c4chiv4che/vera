@@ -59,42 +59,57 @@ current git head of pjsip/pjproject), then build the SWIG Python
 bindings against the locally-built pjproject, then install those
 bindings into the spike venv.**
 
-> TODO — paste the EXACT command sequence that worked, copied from
-> the shell history of the session that succeeded. The standard
-> recipe below is a placeholder; replace it with the verified
-> sequence before treating this section as documentation.
->
-> Placeholder (NOT verified — replace):
-> ```bash
-> sudo apt install -y build-essential swig libssl-dev libasound2-dev \
->                     pkg-config python3-dev
-> git clone https://github.com/pjsip/pjproject.git ~/src/pjproject
-> cd ~/src/pjproject
-> ./configure --enable-shared CFLAGS="-fPIC"
-> make dep && make
-> sudo make install
-> sudo ldconfig
-> cd pjsip-apps/src/swig
-> make python
-> cd python
-> "$SPIKE_VENV/bin/python" setup.py install
-> ```
+**Verified in WSL2 dev session (Ubuntu 24.04 Noble, Python 3.12).
+M2 adapts this for a container — pinned version + clean install. See
+the two action items immediately below.**
 
-The fact that build-from-source was required has direct M2 consequences:
+```bash
+# 1. Build deps
+sudo apt install -y build-essential python3-dev libasound2-dev pkg-config swig
 
-- ECS deployment is no longer "use a base image with pjsua2 from apt".
-  The Dockerfile must compile pjproject (or a vendored snapshot of it)
-  from source, with the right `--enable-shared / CFLAGS=-fPIC` flags,
-  and then build the SWIG Python bindings against that.
-- The pjproject version we used is `2.17-dev` — pre-release, a moving
-  target on `master`. For M2 the Dockerfile should **pin a specific
-  pjproject commit** rather than tracking head, so the same SIP stack
-  ships every time.
-- Image size and build time both grow: the container needs the C
-  toolchain at build time. Multi-stage Docker is the obvious fit
-  (compile pjproject in a builder stage, copy the shared libs + Python
-  bindings into a slim runtime stage). Estimate this before standing
-  the M2 image up always-on.
+# 2. pjproject from source (PyPI sdist broken, apt absent on Noble)
+cd ~
+git clone https://github.com/pjsip/pjproject.git
+cd pjproject
+./configure --enable-shared CFLAGS="-fPIC"
+make dep && make -j$(nproc)
+sudo make install && sudo ldconfig
+# check: pkg-config --modversion libpjproject  → 2.17-dev
+
+# 3. Python binding (SWIG) — compiled against Python 3.12
+cd ~/pjproject/pjsip-apps/src/swig/python
+make
+# install into the target venv (here: the spike venv):
+tmp/spike-sip-venv/bin/python setup.py install
+# check: python -c "import pjsua2; ep = pjsua2.Endpoint(); ep.libCreate()"
+#   → log starts with "pjlib 2.17-dev for POSIX initialized"
+```
+
+**M2 actions required to turn this into a reproducible container build
+(NOT optional — the recipe above is a WSL2 dev recipe, not a
+container-ready one):**
+
+1. **Pin a pjproject version.** `git clone` above fetches HEAD, which
+   in this session was `2.17-dev` — a moving target on `master`. M2's
+   Dockerfile must check out a specific tag (or commit SHA), so
+   production never picks up a different pjproject than the one
+   validated. Pick a tagged 2.x release or freeze the commit SHA we
+   built against before the M2 image goes out.
+2. **Clean install, not `setup.py install` into a venv with system
+   site-packages reach.** The WSL2 session used `python setup.py
+   install` (deprecated by setuptools) and the venv pulled in some
+   system site-packages effects. Acceptable for spike validation; not
+   acceptable for a container. M2 builds a wheel from the SWIG output
+   (`pip wheel .` or `python -m build`) inside a builder stage, then
+   `pip install`s that wheel into the slim runtime stage. No reach
+   into the host's system site-packages from inside the container.
+
+The remaining M2 implication, separate from the actions above: the
+container needs the C toolchain at build time, so image size and
+build time both grow. Multi-stage Docker is the obvious fit (compile
+pjproject in a builder stage, copy shared libs + Python bindings into
+a slim runtime stage). Estimate both before standing the M2 image up
+always-on.
 
 ### M1.1 — SIP signaling + media path (softphone, no Nova Sonic)
 
