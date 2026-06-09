@@ -2,8 +2,11 @@
 
 **Status.** M1 partial. Install/integration gate cleared (pjsua2
 imports and creates a SIP Endpoint in the same Python 3.12 venv as
-Strands BidiAgent). Audio end-to-end with a softphone (M1.1 → M1.2c)
-NOT YET RUN; pending the next session.
+Strands BidiAgent). pjsua2 endpoint binds UDP `0.0.0.0:5060` cleanly
+and loads the banking + salud industries in-process. SIP signaling
+end-to-end with a softphone (M1.1) is **BLOCKED BY THE WSL2 DEV
+NETWORK, NOT BY CODE** — diagnosis and the unblock path are in the
+M1.1 section below. M1.2a → M1.2c remain pending behind M1.1.
 
 **Question.** Can Python (specifically `pjsua2` + `Strands BidiAgent`
 in-process) handle SIP/RTP with the latency and reliability needed
@@ -113,7 +116,61 @@ always-on.
 
 ### M1.1 — SIP signaling + media path (softphone, no Nova Sonic)
 
-**Not yet run.** Pending next session.
+**Blocked by the WSL2 dev network — NOT by code.** The Python lane is
+up; the softphone INVITE cannot reach it from Windows. Diagnosis and
+unblock path below; **this is a dev-environment problem only, not an
+architecture problem (see "Implication for M2" at the end of this
+section).**
+
+What works on the Linux side:
+
+- pjsua2 endpoint comes up: `libCreate / libInit / libStart` succeed,
+  UDP transport opened on `0.0.0.0:5060`. Verified with
+  `ss -ulnp | grep 5060` — socket bound to `*:5060`, owned by the
+  spike process.
+- Banking and salud industries load in-process alongside the
+  endpoint; no import or init regressions.
+
+What does NOT work, and why:
+
+- A softphone running on the **Windows host** sends INVITE to the
+  WSL2 VM's IP (`172.20.208.53/20`, gateway `.1`) on UDP 5060. The
+  INVITE **never arrives** at the pjsua2 socket. Root cause: WSL2
+  runs the VM behind a NAT that does not forward inbound UDP from
+  the Windows host into the VM. SIP signaling between Windows host
+  ↔ WSL2 VM is therefore unreachable by default.
+
+Attempts ruled out with evidence (do not re-try blindly next session):
+
+1. **WSL2 `mirrored` networking mode** (drops NAT, exposes the VM on
+   the host's network stack directly). FAILED to configure on this
+   machine: `wsl --shutdown` followed by `.wslconfig` with
+   `networkingMode=mirrored` returned `ConfigureNetworking` internal
+   error `0x8007054f`, then silently reverted to `None` and left WSL
+   networking broken. Reverted to NAT to restore the dev env.
+2. **Windows Defender Firewall inbound rule on UDP 5060.** Created
+   successfully, did NOT change behaviour — the INVITE still never
+   reaches the VM. Confirms the block is the WSL2 NAT, not the
+   Windows firewall.
+3. **`netsh interface portproxy`** for UDP 5060 → VM. Discarded
+   up-front: `netsh portproxy` supports TCP only, not UDP.
+
+Recommended unblock path for the next session (NOT attempted yet):
+
+- **Run the softphone inside WSL2** (Linphone CLI, or `pjsua` from
+  the pjproject build tree) and dial `sip:127.0.0.1:5060`. This
+  avoids the Windows ↔ WSL2 NAT crossing entirely and exercises the
+  full SIP + RTP + (M1.2b onward) Nova Sonic path end-to-end on
+  loopback inside the VM. Same code path as a real call once the
+  signaling is in.
+
+**Implication for M2 — this is a dev-only constraint.** In ECS
+(deploy target) there is no WSL2 NAT in front of the container; SIP
+and RTP arrive directly via the service's ENI / NLB. The blocker is
+the *developer machine's network shape*, not the b1 architecture.
+The "WSL2 ≠ ECS host-networking RTP" caveat in the Environment
+section above already covers the production-side qualifier; do not
+read M1.1's signaling block as a b1 viability hit.
 
 ### M1.2a — Echo loopback (`VERA_SIP_ECHO=1`, no Nova Sonic)
 
@@ -143,6 +200,10 @@ What is settled:
 
 What is NOT settled by M1.0 (must not be quoted as resolved):
 
+- **SIP signaling end-to-end.** The endpoint binds and listens, but no
+  INVITE has reached it yet — softphone-on-Windows can't traverse the
+  WSL2 NAT (see M1.1). Unblock path is "softphone inside WSL2 against
+  `127.0.0.1:5060`"; until that runs, signaling is unexercised.
 - **Audio quality / latency over a real call.** All four softphone-based
   tests (M1.1, M1.2a, M1.2b, M1.2c) are still pending. The pjsua2 ↔
   asyncio bridge has been compiled and imported, not yet exercised
@@ -151,7 +212,8 @@ What is NOT settled by M1.0 (must not be quoted as resolved):
   unresolvable resample artifacts — could still fire when those tests
   run.
 - **ECS host-networking RTP behaviour.** WSL2 is not a proxy for
-  production network conditions.
+  production network conditions. (Note: the WSL2 NAT issue that blocks
+  M1.1 today does NOT exist on ECS — it is a dev-machine artifact.)
 
 Practical reading:
 
