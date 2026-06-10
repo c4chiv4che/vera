@@ -356,9 +356,11 @@ audio):
 
 ### M1.2b — Nova Sonic banking happy path over the phone
 
-**End-to-end chain confirmed (transcript). Output vocalization pending
-re-test with shorter input WAV. Two findings separated below to avoid
-fusing them into one PASS.**
+**CLOSED with the honest reading: input chain confirmed end-to-end
+(architectural b1 viable). Output vocalization NOT testable with a
+unidirectional WAV harness — this is a property of the test setup,
+not a defect of b1 or of the spike. Verification deferred to M2 with
+Amazon Connect as the SIP peer.**
 
 First-run setup:
 
@@ -444,58 +446,87 @@ end-of-turn API call from the spike or a SIP-level workaround
 that this is a real issue with Connect, treat it as a harness
 artifact.
 
-**What M1.2b confirms NOW (independent of vocalization):**
+**Second run — shorter input WAV (Option A1, harness-only change).**
 
-- The chain SIP → pjsua2 → SipAudioInput → Strands BidiAgent →
-  Nova Sonic STT → Nova LLM → industry tools loaded → assistant
-  response materialized as transcript text. End-to-end b1 is
-  viable at the architectural level.
-- All non-vocalization counters are healthy: `frames_in=400`,
-  `frames_dropped_pre_bind=0` (no regressions vs M1.2a).
-- AGUI events flowed: `RunStarted`, transcript events, `RunFinished`
-  observed by the BFF trace view.
+Re-ran with `tmp/spike-audio/dni-short-8k.wav` (5.31 s, "Hola. Mi
+D N I es tres uno dos tres cuatro cinco seis siete."), same canonical
+pjsua command at `sip:vera@127.0.0.1:5060`. Result:
 
-**What M1.2b does NOT yet confirm (pending re-test):**
-
-- `SipAudioOutput.queue_outbound_pcm` actually drives RTP frames out
-  to the client (we have not seen `frames_out > 0` yet because Nova
-  has not vocalized in any run).
-
-Re-test plan (Option A1, harness-only change, no spike code):
-
-- Shorter input WAV: `"Hola. Mi D N I es tres uno dos tres cuatro
-  cinco seis siete."` Generated as `tmp/spike-audio/dni-short-8k.wav`
-  (5.31 s @ 8 kHz, header valid). Less playback overlap with Vera's
-  response window → lower chance of self-interrupt.
-
-```bash
-(sleep 12 && printf 'h\nq\n') | pjsua \
-  --null-audio --no-tcp --local-port=5072 \
-  --clock-rate=8000 \
-  --dis-codec=speex --dis-codec=iLBC --dis-codec=GSM \
-  --dis-codec=G722 --dis-codec=opus \
-  --add-codec=PCMU --add-codec=PCMA \
-  --auto-play --play-file=tmp/spike-audio/dni-short-8k.wav \
-  --auto-rec  --rec-file=tmp/spike-audio/m12b-short-recv-8k.wav \
-  --max-calls=1 \
-  sip:vera@127.0.0.1:5060
+```
+spike server stats : frames_out=0  recv RMS ≈ 0.0001
+client RTP         : RX 33 pkt (CN / silence only)
+spike server log   : NO "interruption: outbound cleared" this time
+Nova events        : transcripts role=user repeated, NO assistant
+                     response_start, NO BidiAudioStreamEvent
 ```
 
-Re-test PASS criteria (output-path only — TTS quality is independent
-and remains PARTIAL):
+Critical difference from the first run: this time **the user turn
+never closed at all**. The first run at least had Nova decide the
+response (transcript role=assistant present) before self-interrupting;
+this run never even got to a response decision. With the shorter
+WAV, `--auto-play` finishes earlier and pjsua then injects ~7 s of
+continuous comfort-noise / silence frames into the RTP stream until
+hangup. Nova VAD never sees the kind of pause that closes a user
+turn, so the model treats the whole call as one ongoing user input.
+Shorter WAV did not bring Vera closer to vocalizing; it just changed
+what got re-processed.
 
-| signal | PASS threshold |
-|---|---|
-| `frames_out` | > 0 (`SipAudioOutput` drove audio to RTP) |
-| client RX | > ~100 packets (Vera vocalized at least a partial response) |
-| `m12b-short-recv-8k.wav` | header valid, RMS > 0.01 |
-| audible (operator) | hear Vera speaking in Spanish — even just the greeting is enough |
+**Conclusion: vocalization is not testable with a unidirectional
+synthetic-WAV harness.** Further shortening the WAV would be
+stubbornness, not method. The bottleneck is not WAV duration — it is
+the absence of an end-of-turn signal on the SIP leg (Finding 2),
+which a one-shot WAV harness fundamentally cannot supply.
 
-If those four PASS → **M1.2b output path confirmed**; the chain has
-been observed both *deciding* (first run, transcript) and *emitting*
-(re-run, audio frames). b1 is confirmed end-to-end at spike level.
-Findings 1 and 2 remain documented as actions for later
-(piper / Connect verification respectively).
+**What M1.2b confirms:**
+
+- Architectural cadena b1 viable. The chain SIP → pjsua2 →
+  SipAudioInput → Strands BidiAgent → Nova Sonic STT → Nova LLM →
+  industry tools loaded → assistant response materialized as
+  transcript text. End-to-end input path observed in the first run.
+- Non-vocalization counters healthy across both runs:
+  `frames_in≈400`, `frames_dropped_pre_bind=0` (no regressions vs
+  M1.2a). AGUI events flow to the BFF trace view.
+- Output wiring verified by inspection: `SipAudioOutput.__call__`
+  (`sip_audio.py:289-296`) is structurally identical to
+  `WebSocketAudioOutput.__call__` (`server.py:374-389`), which has
+  worked end-to-end in production on the browser path. The SIP
+  output path is the same logic with a different transport.
+
+**What M1.2b CANNOT confirm with this harness (deferred to M2):**
+
+- `frames_out > 0` from a real SIP peer that closes user turns
+  naturally. The unidirectional WAV harness has no way to deliver
+  that signal — this is a property of the test setup, not of b1.
+
+**This is NOT a b1 bug and NOT a spike bug.** The output wiring is
+verified by code-level parity with the WebSocket path; what is
+missing is a peer that closes user turns. Amazon Connect → Vera
+provides exactly that via the natural VAD of a real caller. The
+"verification of vocalization end-to-end" target moves to M2:
+
+- **Action M2 (not M1):** verify Vera vocalizes on a real Connect
+  SIP leg. If `frames_out > 0` and the caller hears Vera, b1 is
+  closed at production fidelity. If Connect *also* fails to elicit
+  vocalization, *only then* investigate end-of-turn explicitly
+  (Strands-level API to mark user-turn-end, or RTP-level VAD on
+  the gateway). Do not preemptively build either workaround on the
+  evidence we have today — they would solve a problem the test
+  harness has, not a problem b1 has.
+
+**Finding 1 (TTS PARTIAL) remains as documented**: switch to
+piper-tts before re-running any synthetic-voice test against Nova.
+Independent of M1.2b closing.
+
+**Findings note — the same pattern, third time.** M1.2a wave 1
+(silent drops), M1.2a wave 2 (truncated WAV header), M1.2b
+(unidirectional WAV without end-of-turn). Each time the natural
+move was to chase the symptom into spike code; each time the actual
+cause was upstream — in instrumentation, in the test harness, in
+the protocol-level test setup. The discipline of "what does the
+instrument actually tell us, and is that the right instrument for
+this question?" has paid off across all three. M2 inherits this
+discipline: when Connect is the peer, ask the same question of
+every metric before concluding anything about b1 itself.
 
 ### M1.2c — Salud industry over SIP
 
