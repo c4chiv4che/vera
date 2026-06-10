@@ -89,10 +89,17 @@ class SipBridge:
         self._frames_in = 0
         self._frames_out = 0
         self._frames_silence = 0
+        self._frames_dropped_pre_bind = 0
 
     # --- asyncio side --------------------------------------------------
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop):
+        # Idempotent: _wire_audio binds eagerly so the inbound queue exists
+        # before the first RTP frame arrives. SipAudioInput.start() still
+        # calls this defensively for standalone use; the no-op guard below
+        # prevents pisar the existing queue (which would leak buffered frames).
+        if self._loop is loop and self._inbound is not None:
+            return
         self._loop = loop
         self._inbound = asyncio.Queue(maxsize=200)
 
@@ -132,6 +139,7 @@ class SipBridge:
             "frames_in": self._frames_in,
             "frames_out": self._frames_out,
             "frames_silence": self._frames_silence,
+            "frames_dropped_pre_bind": self._frames_dropped_pre_bind,
             "outbound_queued": self._outbound.qsize(),
         }
 
@@ -154,6 +162,19 @@ class SipBridge:
         loop = self._loop
         inbound = self._inbound
         if loop is None or inbound is None:
+            # Window between RTP starting (onCallMediaState wires the port)
+            # and SipAudioInput.start() calling bind_loop(). Frames that land
+            # here are the FIRST words of the caller — silently dropping them
+            # means "Vera didn't hear the greeting", which is a nightmare to
+            # debug. Log the first one and then every 50th (~1s of audio).
+            self._frames_dropped_pre_bind += 1
+            n = self._frames_dropped_pre_bind
+            if n == 1 or n % 50 == 0:
+                log.warning(
+                    "inbound dropped pre-bind: bridge.bind_loop() not called yet "
+                    "(total dropped this call: %d frames ≈ %d ms)",
+                    n, n * SIP_FRAME_MS,
+                )
             return
         self._frames_in += 1
         try:
@@ -187,13 +208,17 @@ class SipMediaPort(pj.AudioMediaPort):
         self._fmt = fmt
 
     def onFrameReceived(self, frame):  # noqa: N802 (pjsua2 vtbl naming)
+        # frame.buf is a pj::ByteVector (SWIG-wrapped C++ vector). The binding
+        # exposes copy_to_bytearray() as the canonical Python reader — see
+        # pjsua2.py:438. Slicing the vector through __getitem__ also works
+        # but is ~10x slower per frame.
         try:
-            buf = frame.buf
-            size = getattr(frame, "size", None) or len(buf)
-            if isinstance(buf, (bytes, bytearray)):
-                data = bytes(buf[:size])
-            else:
-                data = bytes(bytearray(buf[:size]))
+            size = frame.size
+            if not size:
+                return
+            buf = bytearray(size)
+            frame.buf.copy_to_bytearray(buf)
+            data = bytes(buf)
         except Exception as e:
             log.warning("onFrameReceived: cannot read frame.buf (%s)", e)
             return
@@ -201,10 +226,20 @@ class SipMediaPort(pj.AudioMediaPort):
             self._bridge.on_frame_received(data)
 
     def onFrameRequested(self, frame):  # noqa: N802
+        # frame.buf arrives empty and MUST be filled in-place (the setter is
+        # typed pj::ByteVector* and rejects list/bytes — that was BUG 2).
+        # assign_from_bytes() is the binding's canonical writer; see
+        # pjsua2.py:435 and the onFrameRequested docstring at pjsua2.py:5779.
         data = self._bridge.on_frame_requested()
         try:
             frame.type = pj.PJMEDIA_FRAME_TYPE_AUDIO
-            frame.buf = list(data)
+            frame.buf.assign_from_bytes(data)
+            frame.size = len(data)
+        except TypeError:
+            # Belt-and-braces: if the binding is strict about bytes vs bytearray
+            # on this build, retry with bytearray. assign_from_bytes accepts
+            # either in current PJSIP master, but pinning is uncertain.
+            frame.buf.assign_from_bytes(bytearray(data))
             frame.size = len(data)
         except Exception as e:
             log.warning("onFrameRequested: cannot write frame.buf (%s)", e)

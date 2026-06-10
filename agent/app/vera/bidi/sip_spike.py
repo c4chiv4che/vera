@@ -129,6 +129,13 @@ class VeraSipCall(pj.Call):
             return
         self._wired = True
         self._bridge = SipBridge()
+        # Bind the asyncio loop BEFORE creating the port — otherwise the
+        # first inbound RTP frames (which can fire as soon as startTransmit
+        # returns) hit on_frame_received with _loop=None and get dropped
+        # into _frames_dropped_pre_bind. SipAudioInput.start() also calls
+        # bind_loop() defensively, but it runs later (when agent.run()
+        # starts) and never runs in ECHO_MODE.
+        self._bridge.bind_loop(self._loop)
         self._port = self._bridge.make_port()
         # Bidirectional: call → port (mic) and port → call (speaker).
         call_audio.startTransmit(self._port)
@@ -252,8 +259,17 @@ async def main_async():
     tport_cfg = pj.TransportConfig()
     tport_cfg.port = SIP_PORT
     ep.transportCreate(pj.PJSIP_TRANSPORT_UDP, tport_cfg)
+
+    # Headless mode: the conference bridge needs a clock master; by default
+    # pjsua2 takes it from the system sound device (lazy-opened on the first
+    # startTransmit). ECS containers and WSL2 have no sound card — so use the
+    # null device, which provides timing without touching hardware. This is
+    # a production requirement, not a dev workaround: see phase-d-m1-verdict.
+    ep.audDevManager().setNullDev()
     ep.libStart()
-    log.info("pjsua2 endpoint up")
+    dev_count = ep.audDevManager().getDevCount()
+    log.info("pjsua2 endpoint up (null audio device — host has %d sound devs, headless OK)",
+             dev_count)
 
     ready = threading.Event()
     worker = threading.Thread(

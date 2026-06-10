@@ -174,7 +174,185 @@ read M1.1's signaling block as a b1 viability hit.
 
 ### M1.2a — Echo loopback (`VERA_SIP_ECHO=1`, no Nova Sonic)
 
-**Not yet run.** Pending next session.
+**First run revealed two spike-code bugs; both fixed; re-test pending.**
+
+Run setup that exercised the path:
+
+- Headless prerequisite: `audDevManager().setNullDev()` before
+  `libStart()` in `sip_spike.py`. The conference bridge needs a clock
+  master; by default pjsua2 lazy-opens the system sound device and
+  fails on WSL2 (and would fail on ECS). The null device provides
+  timing without touching hardware. **This is a production requirement
+  for ECS, not a WSL2 workaround** — resolving it in M1 means M2's
+  container build inherits the same audio model with no rework.
+- pjsua client (also inside WSL2) playing a synthetic PCM16 mono 8 kHz
+  sweep with `--null-audio`, `--auto-play`, `--auto-rec`, codecs forced
+  to PCMU/PCMA so the negotiated leg matches what Amazon Connect will
+  send. SIP + RTP layer behaved correctly: 400 packets TX, 32 RX, 0%
+  loss, PCMA negotiated, jitter ~0.1 ms.
+
+Two implementation bugs surfaced; both isolated, both fixed in this
+session:
+
+1. **`bind_loop` was never called in ECHO_MODE.** `SipBridge.bind_loop`
+   lived only inside `SipAudioInput.start()`, which is instantiated
+   from `_run_agent()` (the Nova Sonic path). `ECHO_MODE` dispatches
+   `_echo_loop` instead, so the asyncio queue was never created and
+   every inbound RTP frame hit the `loop is None` guard in
+   `on_frame_received` and was dropped. Stats from the failed run:
+   `frames_dropped_pre_bind=400`, `frames_in=0`. **Fix:** bind the
+   loop in `_wire_audio` (the canonical point where the bridge is
+   created and the loop is already available), make `bind_loop`
+   idempotent so the existing `SipAudioInput.start()` call remains a
+   defensive no-op for standalone use.
+2. **`onFrameRequested` wrote to `frame.buf` with the wrong type.** The
+   pjsua2 SWIG binding types `MediaFrame.buf` as `pj::ByteVector *`;
+   reassigning it from Python (`frame.buf = list(data)`) raises
+   `MediaFrame_buf_set ... argument 2 of type 'pj::ByteVector *'`. The
+   binding's own docstring (`pjsua2.py:5779-5784`) states that
+   `frame.buf` arrives as an empty vector and must be **filled
+   in-place**. `ByteVector` exposes `assign_from_bytes()` as the
+   canonical Python writer (`pjsua2.py:435`). **Fix:** use
+   `frame.buf.assign_from_bytes(data)` in `onFrameRequested`. While
+   on it, migrate `onFrameReceived` to the matching reader
+   `frame.buf.copy_to_bytearray(buf)` — the previous slice-based
+   read worked by accident via `ByteVector.__getitem__` but was ~10x
+   slower per frame and asymmetric with the writer.
+
+**Evidence note 1 — the spike bugs were caught by instrumentation we
+added on purpose, not by luck.** Both observable symptoms came from
+the silent-drop counter (`frames_dropped_pre_bind`) added in
+`sip_audio.py` at the start of this session, and the `cannot write
+frame.buf` log that already existed but became actionable because the
+counter explained *why* none of the inbound frames reached the agent.
+Without the counter, the failed run would have looked like "Vera
+didn't hear the greeting" with no path back to the root cause —
+exactly the debug nightmare the rule `[[feedback_no_silent_drops]]`
+is meant to prevent.
+
+**Second-run result (eco certified on existing audio, Plan B).** The
+fixed re-run gave `frames_in=400`, `frames_dropped_pre_bind=0`,
+`frames_silence=1`, `frames_out=0`, `outbound_queued=1`; client side
+TX 400 / RX 400 / 0% loss, PCMA negotiated. The recorded WAV was
+*structurally invalid* (`"not a WAVE file"`), which initially looked
+like the echo had broken in a new way. Two further bugs surfaced —
+**both in the test harness, neither in the spike**:
+
+1. **`pjsua --duration=N` does not flush the WAV recorder header.**
+   The `pjmedia_wav_writer_port` holds the RIFF/data chunk sizes in
+   memory and only writes them at `pjmedia_port_destroy()`, which
+   runs from `pjsua_destroy()`. `--duration=N` ends the call but does
+   not destroy the endpoint, so an abrupt exit (Ctrl+C, kill) leaves
+   the recorded WAV with `RIFF size = 0` and `data size = 0`.
+   Confirmed with `xxd` against the recv file from the second run:
+   bytes 4-7 and 40-43 both `00 00 00 00`. **Audio is intact starting
+   at byte 44**, only the header chunk-size fields are missing.
+2. **`pjsua --rec-file` writes at the clock-master rate, not the
+   negotiated codec rate.** Default clock master is 16 kHz. PCMA
+   negotiated at 8 kHz, pjsua resamples 8 k → 16 k internally before
+   writing. Confirmed in the recv header: bytes 24-27 = `803e 0000` =
+   16000. Fix is `--clock-rate=8000` on the client.
+
+Plan B closed the diagnostic without re-running: patched the two
+chunk sizes from the file length, taught `compare_echo_wav.py` to
+align mismatched sample rates with `audioop.ratecv`, then ran the
+comparator. Result on the patched + resampled artifact:
+
+```
+Pearson at peak              : 0.9765
+~SNR                         : 23.9 dB
+echo lag                     : 78.9 ms
+aligned region               : 3.000 s
+PASS: correlation 0.977 >= 0.7 — echo returned the input audio
+```
+
+**Verdict: the RTP → SipMediaPort → asyncio.Queue → _echo_loop →
+queue.Queue → SipMediaPort → RTP path is correct.** M1.2a is
+functionally complete pending one clean artifact run (see plan
+below).
+
+**Evidence note 2 — the measurement instrument was wrong, again.**
+Without the binary header inspection, the natural next step would
+have been to refactor `_echo_loop` to fix a bug it did not have —
+exactly the failure mode of fixing the symptom upstream of the real
+cause. The pattern from note 1 repeats one level out: there, a
+silent drop on the way IN made a working agent look broken; here, a
+silent corruption on the way OUT (truncated header + wrong rate)
+made a working echo look broken. Both times the recovery was the
+same — read what the instrument actually wrote, not what we thought
+it had written. Keep this in mind for M1.2b: when Nova Sonic is in
+the loop, every test artifact (logs, recorded audio, AGUI events)
+needs to be checked for "is the instrument lying?" before drawing
+conclusions about the agent.
+
+Clean-artifact re-run plan (last step for M1.2a verdict):
+
+```bash
+(sleep 8 && printf 'h\nq\n') | pjsua \
+  --null-audio --no-tcp --local-port=5072 \
+  --clock-rate=8000 \
+  --dis-codec=speex --dis-codec=iLBC --dis-codec=GSM \
+  --dis-codec=G722 --dis-codec=opus \
+  --add-codec=PCMU --add-codec=PCMA \
+  --auto-play --play-file=tmp/spike-audio/tono-8k.wav \
+  --auto-rec  --rec-file=tmp/spike-audio/recv-8k.wav \
+  --max-calls=1 \
+  sip:vera@127.0.0.1:5070
+```
+
+- `--clock-rate=8000` makes the recorder native 8 kHz (no resample
+  in the comparator).
+- Replacing `--duration=8` with `(sleep 8 && printf 'h\nq\n') | ...`
+  routes through `pjsua_destroy()` and flushes the WAV header
+  cleanly.
+
+Expected at completion: same server counters as the second run, plus
+a valid WAV at 8 kHz that `compare_echo_wav.py` accepts without
+hitting the resample branch.
+
+**Clean-artifact run result — M1.2a CLOSED.**
+
+Re-ran with `--clock-rate=8000` and the stdin pipe replacing
+`--duration`. Recorded WAV opened natively at 8 kHz with a valid
+header; the comparator's resample branch was not exercised.
+
+```
+Pearson at peak              : 0.960
+~SNR                         : 21.7 dB
+echo lag                     : 66.5 ms
+```
+
+The patched run (Plan B, Pearson 0.977 / SNR 23.9 dB / lag 78.9 ms)
+remains in the record as **diagnostic evidence**; this clean run is
+the **canonical artifact** for M1.2a.
+
+What is now settled:
+
+- `audDevManager().setNullDev()` before `libStart()` makes the spike
+  run headless on WSL2 and (by design) on ECS — the conference
+  bridge's clock master is virtual, no sound card required.
+- The pjsua2 ↔ asyncio bridge (`SipMediaPort` + `SipBridge`) carries
+  RTP through `assign_from_bytes` / `copy_to_bytearray` correctly,
+  no audio device touched, ~67 ms round-trip lag in loopback.
+- `compare_echo_wav.py` (pure stdlib) is the headless audio gate for
+  the rest of Phase D — no sox/ffmpeg/numpy dependency.
+
+Canonical pjsua client command for any 8 kHz codec test against the
+spike (use as-is for M1.2b/c, swap the play-file for the relevant
+audio):
+
+```bash
+(sleep 8 && printf 'h\nq\n') | pjsua \
+  --null-audio --no-tcp --local-port=5072 \
+  --clock-rate=8000 \
+  --dis-codec=speex --dis-codec=iLBC --dis-codec=GSM \
+  --dis-codec=G722 --dis-codec=opus \
+  --add-codec=PCMU --add-codec=PCMA \
+  --auto-play --play-file=<wav-at-8khz> \
+  --auto-rec  --rec-file=tmp/spike-audio/recv-8k.wav \
+  --max-calls=1 \
+  sip:vera@127.0.0.1:5070
+```
 
 ### M1.2b — Nova Sonic banking happy path over the phone
 
