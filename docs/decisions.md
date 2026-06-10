@@ -818,3 +818,87 @@ options to be offered before any always-on resource is created.
 **Status.** M0 closed (architecture understood, path chosen at the
 high level, D2 pending a code spike). No infra, no cost incurred.
 Next: resolve D2 via M1 spike. Telephony bridge = Phase D.
+
+## 2026-06 — Phase D (M1): D2 resolved toward b1 — Python lane viable, output vocalization deferred to M2
+
+**Context.** M0 left D2 open: rebuild the brain in Java/JS to follow
+the official AWS samples (a), build a Python SIP/RTP gateway driving
+Strands in-process (b1, maximum reuse), or split into Java/JS gateway
++ Python brain over an internal hop (b2). M1 was a code spike on the
+`spike/phase-d-sip-python` branch designed to settle D2 with evidence,
+not desk research.
+
+**D2 resolved → b1, with the precise reading below.** "b1 viable
+architecturally": Python (pjsua2 + Strands BidiAgent + Nova Sonic +
+industries + AGUI) handles the full SIP/RTP stack in one process. The
+spike found no Python-side or wiring-side blocker that would force
+b2. **This is NOT "b1 confirmed end-to-end with voice"** — no SIP
+client heard Vera speak in any M1 run. Output vocalization on the SIP
+leg is verified by code-level parity with the production WebSocket
+path, not by frames flowing through this harness; that exercise
+belongs to M2 with Connect as the SIP peer (the harness cannot
+supply the user-turn-end signal a real SIP peer would). What IS
+confirmed: the architecture is the right one to bet M2 on.
+
+**Exercised end-to-end (artifacts in `docs/phase-d-m1-verdict.md`).**
+- `pjsua2` + Strands `bidi` coexist in one Python 3.12 venv. b2
+  trigger "pjsua2 install fight >2 h with no path forward" cleared.
+  Install recipe is build-from-source — known engineering shape.
+- Headless RTP: `setNullDev()` before `libStart()`, conference bridge
+  runs against a null clock. This is a production requirement for
+  ECS, not a WSL2 workaround.
+- SIP signaling on loopback inside WSL2: INVITE → 100 → 200 OK → ACK
+  → CONFIRMED (M1.1).
+- RTP through `SipMediaPort` / `SipBridge`: 400 frames in, 400 out,
+  Pearson 0.96 against input, ~67 ms round-trip lag (M1.2a clean
+  artifact). Validates the in-memory buffer model that ECS will
+  require.
+- Input chain end-to-end: SIP/RTP → Nova Sonic STT (Spanish) →
+  Strands → banking industry tools loaded → assistant response
+  materialized as transcript text (M1.2b first run).
+
+**Verified by code-level inspection, NOT exercised by frames.**
+- Output vocalization path `SipAudioOutput.queue_outbound_pcm` →
+  `_outbound` → `onFrameRequested` → RTP. Structurally identical to
+  `WebSocketAudioOutput.__call__` (`server.py:374-389`), which works
+  end-to-end in production on the browser leg. M1.2b never reached
+  `frames_out > 0` because a unidirectional WAV harness cannot
+  deliver an end-of-turn signal a real SIP peer would.
+
+**Pending M2 (production-fidelity verification).**
+- Exercise output vocalization against Amazon Connect as the SIP
+  peer. Real caller VAD closes user turns naturally. Only if Connect
+  ALSO fails to elicit vocalization, invest in an explicit
+  end-of-turn workaround (Strands-level API or RTP-level VAD on the
+  gateway). Do not preemptively build either workaround on
+  harness-side evidence.
+- Speech-input quality with a non-synthetic voice. espeak proved
+  too robotic for digit transcription against Nova STT; switch to
+  piper-tts or real-caller voice before drawing any conclusion
+  about Nova STT quality.
+- RTP behaviour on ECS host-networking. WSL2 is not a proxy for
+  production network conditions.
+- Industry switching at runtime: `load_industry()` verified industry-agnostic by inspection in M1.2b; M1.2c deferred to M2 as integration.
+
+**Findings carried into M2 planning.**
+- M1.0 install recipe is non-trivial: PyPI sdist broken, apt absent
+  on Ubuntu Noble, only path is build-from-source. M2 Dockerfile is
+  a multi-stage build (builder stage compiles pjproject + SWIG
+  bindings, runtime stage gets the wheel) with a pinned pjproject
+  version (not HEAD — the M1 build was against `2.17-dev`, a moving
+  target).
+- M1.1 WSL2 NAT blocker is a dev-machine artifact, not an ECS shape
+  issue. ECS host networking does not have the WSL2 NAT in front of
+  the container.
+
+**Spike branch.** `spike/phase-d-sip-python` stays in place as
+evidence + reference — **NOT merged into main**. The code under
+`agent/app/vera/bidi/sip_*.py` plus harnesses (`compare_echo_wav.py`,
+`synth_speech_wav.py`) is throwaway by design. M2 will re-derive
+production gateway code against Connect-side requirements (codec
+selection, NAT/STUN, observability, FD/memory ceilings, container
+shape).
+
+**Status.** D2 closed → b1. M1 closed. M2 planning starts with the
+scope above. No infra, no cost incurred (the spike ran entirely on
+the dev machine).
