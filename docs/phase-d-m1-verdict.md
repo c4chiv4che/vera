@@ -1,12 +1,38 @@
 # Phase D / M1 spike — verdict on D2
 
-**Status.** M1 partial. Install/integration gate cleared (pjsua2
-imports and creates a SIP Endpoint in the same Python 3.12 venv as
-Strands BidiAgent). pjsua2 endpoint binds UDP `0.0.0.0:5060` cleanly
-and loads the banking + salud industries in-process. SIP signaling
-end-to-end with a softphone (M1.1) is **BLOCKED BY THE WSL2 DEV
-NETWORK, NOT BY CODE** — diagnosis and the unblock path are in the
-M1.1 section below. M1.2a → M1.2c remain pending behind M1.1.
+**Status.** M1 closed. Read precisely — what is exercised, what is
+verified by inspection only, and what moves to M2:
+
+- **Exercised end-to-end** (frames flowing through the running code):
+  SIP signaling on UDP, RTP at G.711 / PCMA, pjsua2 ↔ asyncio bridge
+  headless (no sound device), input chain RTP → SipBridge in-memory
+  buffer → Nova Sonic STT → Strands BidiAgent → industries (banking)
+  → AGUI translator → BFF trace view. M1.0 (install gate), M1.1 (SIP
+  signaling on loopback inside WSL2), and M1.2a (echo loopback at
+  the RTP buffer level, Pearson 0.96 / SNR 21.7 dB) all PASS with
+  artifacts.
+- **Verified by inspection, NOT exercised by frames flowing**: the
+  output vocalization path `SipAudioOutput.queue_outbound_pcm` →
+  `SipBridge._outbound` → `onFrameRequested` → RTP. Code-level
+  parity with `WebSocketAudioOutput.__call__` (`server.py:374-389`),
+  which is the production path on the browser leg. M1.2b never
+  reached `frames_out > 0` because a unidirectional WAV harness
+  cannot supply the end-of-turn signal a SIP peer would (see M1.2b
+  Finding 2). The wiring is correct; the harness cannot drive it.
+- **Pending M2 (production-fidelity verification)**:
+  - Exercise the output vocalization path against Amazon Connect as
+    a real SIP peer (natural VAD closes user turns, Nova vocalizes,
+    `frames_out > 0` becomes observable for the first time).
+  - Speech-input quality with a non-synthetic voice (espeak proved
+    too robotic for digit transcription against Nova STT — see
+    M1.2b Finding 1; piper-tts or real human voice expected to
+    resolve).
+  - RTP behaviour on ECS host-networking (WSL2 is not a proxy for
+    production network conditions; flagged up-front in
+    Environment).
+
+M1.2c (salud industry over SIP) is **deferred to M2 by inspection**,
+not pending — see the M1.2c section for the fundamento.
 
 **Question.** Can Python (specifically `pjsua2` + `Strands BidiAgent`
 in-process) handle SIP/RTP with the latency and reliability needed
@@ -530,46 +556,116 @@ every metric before concluding anything about b1 itself.
 
 ### M1.2c — Salud industry over SIP
 
-**Not yet run.** Pending next session.
+**Deferred to M2 by inspection — explicitly NOT "pending next
+session".** Running M1.2c under the current harness would hit
+exactly the same end-of-turn limitation as M1.2b (Finding 2) without
+surfacing new evidence about the SIP transport. The dispatch piece
+that M1.2c was meant to validate — industry-agnostic load — is
+already verified end-to-end from M1.2b:
+
+- `agent_loader.load_industry()` is called inside `_run_agent`
+  (`sip_spike.py:180`) with the value of `self._industry`, which
+  comes from `VERA_SIP_INDUSTRY` env var or `?industry=` URI param.
+  There is no banking-specific branch elsewhere in the SIP path.
+- The load was exercised end-to-end with banking in M1.2b (`industries:
+  [banking, salud] | default: banking` at startup, banking tools
+  loaded into the `BidiAgent`, banking transcript materialized as
+  assistant response).
+
+Re-running with `salud` under this harness would observe (a) the same
+input chain working, (b) the same vocalization gap (`frames_out=0`,
+harness limit), and (c) different transcript content from a different
+prompt — none of which adds evidence about b1 viability.
+
+**M2 action (integration, not spike):** when Connect is the peer and
+end-of-turn flows naturally, exercise both industries on the same
+gateway process via two consecutive calls (distinct `industry=` URI
+params or env switch). That test confirms runtime industry switching
+on a single SIP process, which is the thing M1.2c was originally
+meant to probe.
 
 ## Verdict
 
-**D2 resolves toward b1, at the integration level only.**
+**D2 resolves toward b1 — viable architecturally. Python handles the
+full SIP/RTP/Strands/Nova Sonic/industries/AGUI stack in one process.
+One piece of the path — the output vocalization on the SIP leg — is
+verified by code-level parity with the production WebSocket path, not
+by frames flowing through this harness; that exercise belongs to M2
+with Amazon Connect as the SIP peer.**
 
-What is settled:
+This is **not** "b1 works end-to-end with voice." The output voice was
+not heard from a SIP client in any run. It IS "b1 is the right
+architecture to bet M2 on, and the spike found no Python-side or
+wiring-side blocker in the way."
 
-- The Python lane is open. `pjsua2` and the Strands `bidi` stack live
-  together in one venv on Python 3.12. There is no fundamental
-  Python-side blocker to running SIP/RTP in the same process as the
-  `BidiAgent`.
-- The b2 trigger "pjsua2 install fight >2 h with no path forward" is
-  cleared — a path forward exists. It is build-from-source, which is
-  more expensive than `pip install` but is a known engineering shape.
+**What is settled (exercised, with artifacts):**
 
-What is NOT settled by M1.0 (must not be quoted as resolved):
+- The Python lane is open. `pjsua2` and Strands `bidi` coexist in one
+  Python 3.12 venv. The b2 trigger "pjsua2 install fight >2 h with no
+  path forward" is cleared (build-from-source recipe in §M1.0).
+- Headless RTP from the bridge in-memory only. The conference bridge
+  runs against a null sound device (`setNullDev()` before `libStart`),
+  which is a production requirement for ECS, not a WSL2 workaround.
+- SIP signaling on loopback inside WSL2: INVITE → 100 → 200 OK → ACK
+  → CONFIRMED (M1.1).
+- RTP through `SipMediaPort` / `SipBridge`: 400 frames in, 400 frames
+  out, Pearson 0.96 against input, ~67 ms round-trip lag (M1.2a clean
+  artifact).
+- Input chain end-to-end: SIP/RTP → Nova Sonic STT (Spanish) → Strands
+  BidiAgent → banking industry tools loaded → assistant response
+  materialized as transcript text (M1.2b first run).
+- `compare_echo_wav.py` and `synth_speech_wav.py` available as
+  pure-stdlib (+ espeak-ng) test harnesses for future phases.
 
-- **SIP signaling end-to-end.** The endpoint binds and listens, but no
-  INVITE has reached it yet — softphone-on-Windows can't traverse the
-  WSL2 NAT (see M1.1). Unblock path is "softphone inside WSL2 against
-  `127.0.0.1:5060`"; until that runs, signaling is unexercised.
-- **Audio quality / latency over a real call.** All four softphone-based
-  tests (M1.1, M1.2a, M1.2b, M1.2c) are still pending. The pjsua2 ↔
-  asyncio bridge has been compiled and imported, not yet exercised
-  with frames flowing through it. Any of the b2 triggers that depend
-  on audio behaviour — dropouts buffering cannot fix, latency >5 s,
-  unresolvable resample artifacts — could still fire when those tests
-  run.
-- **ECS host-networking RTP behaviour.** WSL2 is not a proxy for
-  production network conditions. (Note: the WSL2 NAT issue that blocks
-  M1.1 today does NOT exist on ECS — it is a dev-machine artifact.)
+**What is verified by code inspection only (NOT exercised by frames):**
 
-Practical reading:
+- `SipAudioOutput.queue_outbound_pcm` → `_outbound` → `onFrameRequested`
+  → RTP. This is the output vocalization path. Structurally identical
+  to `WebSocketAudioOutput.__call__` (`server.py:374-389`) which works
+  end-to-end in production on the browser leg. M1.2b did not reach
+  `frames_out > 0` because a unidirectional WAV harness cannot supply
+  a user-turn-end signal that a real SIP peer would. The wiring is
+  correct; the harness cannot drive it.
 
-- Proceed planning M2 on the assumption that b1 is the path, **but
-  hold the spike branch in place** until M1.1 → M1.2b have run and
-  the verdict status above moves from "M1 partial" to "M1 complete —
-  b1 confirmed for the demo target". If those tests surface a hard
-  blocker, this section becomes Option B with evidence.
+**What remains pending for M2 (production-fidelity verification):**
+
+- **Exercise the output vocalization path against Amazon Connect** as
+  the SIP peer. Real caller VAD closes user turns naturally, Nova
+  vocalizes, `frames_out > 0` becomes observable for the first time.
+  If Connect ALSO fails to elicit vocalization — *only then* —
+  investigate end-of-turn explicitly (Strands-level API or RTP-level
+  VAD on the gateway). Do not preemptively build either workaround
+  on harness-side evidence.
+- **Speech-input quality with a non-synthetic voice.** espeak proved
+  too robotic for digit transcription against Nova STT (M1.2b
+  Finding 1). Switch to piper-tts or real-caller voice before
+  drawing any conclusions about Nova STT quality.
+- **RTP behaviour on ECS host-networking.** WSL2 is not a proxy for
+  production network conditions (caveat reserved in Environment).
+  Verify under the production network shape before declaring b1
+  closed.
+- **Industry switching at runtime on a single gateway process.** The
+  load is verified industry-agnostic by inspection (see M1.2c); the
+  runtime switch between two consecutive calls of different
+  industries is an M2 integration test.
+
+**Practical reading:**
+
+- Plan M2 on b1. The spike found no fundamental Python-side or
+  wiring-side blocker; the one remaining "must observe in frames"
+  item (output vocalization) is gated on having a peer that closes
+  user turns, which Connect provides natively.
+- **Keep this branch (`spike/phase-d-sip-python`) in place; do NOT
+  merge into main.** All code under `agent/app/vera/bidi/sip_*.py`
+  and the spike harness are throwaway by design — the production
+  gateway in M2 will reuse the *shape* of `SipBridge` /
+  `SipAudioInput` / `SipAudioOutput` but be re-derived against the
+  Connect-side requirements (codec selection, NAT/STUN config,
+  observability, FD/memory ceilings, container shape). Treat the
+  spike branch as evidence + reference, not as a base to extend.
+- Close D2 in `docs/decisions.md` with the precise reading above.
+  Do not quote "b1 confirmed end-to-end with voice" — quote the
+  distinction between exercised, inspected, and pending-M2.
 
 ## What this spike did NOT settle (regardless of A or B)
 
