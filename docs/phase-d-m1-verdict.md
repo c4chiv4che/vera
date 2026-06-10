@@ -356,7 +356,146 @@ audio):
 
 ### M1.2b — Nova Sonic banking happy path over the phone
 
-**Not yet run.** Pending next session.
+**End-to-end chain confirmed (transcript). Output vocalization pending
+re-test with shorter input WAV. Two findings separated below to avoid
+fusing them into one PASS.**
+
+First-run setup:
+
+- Input WAV (~7.3 s) synthesized with `synth_speech_wav.py` + espeak-ng:
+  `"Hola, quiero pedir un préstamo. Mi D N I es tres uno dos tres
+  cuatro cinco seis siete."`
+- Spike in real Nova Sonic mode (`unset VERA_SIP_ECHO`).
+- BFF running for AGUI events (`./dev.sh start bff`).
+- Client pjsua with the canonical 8 kHz / PCMA command, 12 s call.
+
+First-run result:
+
+```
+spike server stats : frames_in=400  frames_dropped_pre_bind=0
+                     frames_out=0   frames_silence=599
+                     outbound_queued=0
+spike server log   : "interruption: outbound cleared"
+client RTP         : TX ~400 / RX ~33 / 0% loss
+transcript         : role=assistant — "Hola, claro que sí!
+                     Qué tipo de préstamo estás buscando?"
+recorded WAV       : silence (no Vera audio)
+```
+
+Reading: Nova Sonic received the input, transcribed it, decided the
+response **as text** (visible in the transcript), and then emitted a
+`BidiInterruptionEvent` **before** the first `BidiAudioStreamEvent` —
+so `SipAudioOutput.queue_outbound_pcm` was never called and the
+outbound queue stayed empty. The wiring is identical to the
+WebSocket path's `WebSocketAudioOutput` (`server.py:374-389`), which
+already works end-to-end in production; `frames_out=0` is not a
+wiring bug.
+
+**Finding 1 — TTS PARTIAL (known, expected, harness-side).**
+
+espeak-ng's synthetic voice did not yield clean digit transcription
+against Nova Sonic STT. Observed errors in the first-run transcript:
+
+- "Mi D N I es" → transcribed as "mi nombre es Pedro".
+- "tres uno dos tres" → transcribed as "noventa y tres".
+
+Cause: synthetic voice with insufficient prosody between digits. No
+spike-code action; the synth pipeline is doing what we asked.
+
+**Action (deferred, NOT for M1.2b closing):** upgrade to piper-tts
+(neural voice) or tune espeak prosody (`--pitch`, explicit pauses
+between digits like "uno, dos, tres"). Note for M2: caracterizing
+the range of voice qualities that the SIP leg tolerates is a real
+test target, but it belongs to integration testing against Connect,
+not to spike validation.
+
+**Finding 2 — end-of-turn signaling absent on the SIP leg
+(architectural, NOT a b1 bug — M2 verification needed).**
+
+The WebSocket leg has an explicit end-of-turn signal: the browser
+sends `{"type":"end"}` (`server.py:354`) when MediaRecorder stops,
+and the server stops feeding audio to Nova. The SIP leg has no
+equivalent: `pjsua --auto-play` finishes the WAV but pjsua keeps
+sending comfort-noise / silence frames until hangup, and there is no
+in-band SIP mechanism that says "user finished their turn". Nova
+Sonic falls back to its own VAD to decide when the turn ends, and in
+this test — a 7.3 s WAV played in one continuous chunk — Nova
+interpreted the late portion of the WAV (or the lingering CN frames
+after it) as "the user is still speaking" and self-interrupted the
+generated response before vocalization.
+
+This is **not a defect of b1** and the spike code does not need to
+fix it:
+
+- In production, Amazon Connect → Vera carries the natural pauses
+  of a real caller. Nova's VAD reads those pauses as turn end and
+  vocalization completes normally — the canonical behaviour of any
+  SIP-based voicebot.
+- The pathology only fires when a test harness plays a long
+  continuous synthetic clip with no pauses, which is exactly our
+  M1.2b harness.
+
+**Action for M2 (not M1):** verify end-of-turn behaviour with
+Connect as the SIP peer (real PCMU/PCMA from a real caller, VAD
+natural). If end-of-turn detection in production shows the same
+self-interrupt symptom, *then* invest in either a Strands-level
+end-of-turn API call from the spike or a SIP-level workaround
+(e.g. RTP-level VAD on the gateway). Until M2 produces evidence
+that this is a real issue with Connect, treat it as a harness
+artifact.
+
+**What M1.2b confirms NOW (independent of vocalization):**
+
+- The chain SIP → pjsua2 → SipAudioInput → Strands BidiAgent →
+  Nova Sonic STT → Nova LLM → industry tools loaded → assistant
+  response materialized as transcript text. End-to-end b1 is
+  viable at the architectural level.
+- All non-vocalization counters are healthy: `frames_in=400`,
+  `frames_dropped_pre_bind=0` (no regressions vs M1.2a).
+- AGUI events flowed: `RunStarted`, transcript events, `RunFinished`
+  observed by the BFF trace view.
+
+**What M1.2b does NOT yet confirm (pending re-test):**
+
+- `SipAudioOutput.queue_outbound_pcm` actually drives RTP frames out
+  to the client (we have not seen `frames_out > 0` yet because Nova
+  has not vocalized in any run).
+
+Re-test plan (Option A1, harness-only change, no spike code):
+
+- Shorter input WAV: `"Hola. Mi D N I es tres uno dos tres cuatro
+  cinco seis siete."` Generated as `tmp/spike-audio/dni-short-8k.wav`
+  (5.31 s @ 8 kHz, header valid). Less playback overlap with Vera's
+  response window → lower chance of self-interrupt.
+
+```bash
+(sleep 12 && printf 'h\nq\n') | pjsua \
+  --null-audio --no-tcp --local-port=5072 \
+  --clock-rate=8000 \
+  --dis-codec=speex --dis-codec=iLBC --dis-codec=GSM \
+  --dis-codec=G722 --dis-codec=opus \
+  --add-codec=PCMU --add-codec=PCMA \
+  --auto-play --play-file=tmp/spike-audio/dni-short-8k.wav \
+  --auto-rec  --rec-file=tmp/spike-audio/m12b-short-recv-8k.wav \
+  --max-calls=1 \
+  sip:vera@127.0.0.1:5060
+```
+
+Re-test PASS criteria (output-path only — TTS quality is independent
+and remains PARTIAL):
+
+| signal | PASS threshold |
+|---|---|
+| `frames_out` | > 0 (`SipAudioOutput` drove audio to RTP) |
+| client RX | > ~100 packets (Vera vocalized at least a partial response) |
+| `m12b-short-recv-8k.wav` | header valid, RMS > 0.01 |
+| audible (operator) | hear Vera speaking in Spanish — even just the greeting is enough |
+
+If those four PASS → **M1.2b output path confirmed**; the chain has
+been observed both *deciding* (first run, transcript) and *emitting*
+(re-run, audio frames). b1 is confirmed end-to-end at spike level.
+Findings 1 and 2 remain documented as actions for later
+(piper / Connect verification respectively).
 
 ### M1.2c — Salud industry over SIP
 
