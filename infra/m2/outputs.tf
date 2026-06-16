@@ -17,3 +17,13 @@ output "gateway_security_group_id" {
   value       = aws_security_group.gateway.id
   description = "Security group ID for the Vera SIP/RTP gateway"
 }
+
+output "task_execution_role_arn" {
+  value       = aws_iam_role.task_execution.arn
+  description = "ARN of the ECS task execution role (used by ECS to start tasks)"
+}
+
+output "task_role_arn" {
+  value       = aws_iam_role.task.arn
+  description = "ARN of the ECS task role (used by the app at runtime)"
+}

@@ -20,3 +20,9 @@ variable "allowed_sip_cidrs" {
   type        = list(string)
   default     = ["0.0.0.0/0"]
 }
+
+variable "nova_sonic_model_arn" {
+  description = "Bedrock foundation model ARN for Amazon Nova Sonic. Region-pinned because Nova Sonic is only in us-east-1."
+  type        = string
+  default     = "arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-sonic-v1:0"
+}

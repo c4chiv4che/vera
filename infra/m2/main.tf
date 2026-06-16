@@ -118,3 +118,78 @@ resource "aws_vpc_security_group_egress_rule" "all_outbound" {
   ip_protocol       = "-1"
   cidr_ipv4         = "0.0.0.0/0"
 }
+
+# ----------------------------------------------------------------------------
+# IAM — Task Execution Role (used by ECS itself to start the task)
+# ----------------------------------------------------------------------------
+# This role is assumed by the ECS agent on Fargate. It needs to pull the
+# image from ECR and write task-level logs to CloudWatch. Nothing app-level.
+
+data "aws_iam_policy_document" "ecs_tasks_assume" {
+  statement {
+    actions = ["sts:AssumeRole"]
+    principals {
+      type        = "Service"
+      identifiers = ["ecs-tasks.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "task_execution" {
+  name               = "vera-m2-task-execution"
+  assume_role_policy = data.aws_iam_policy_document.ecs_tasks_assume.json
+
+  tags = {
+    Name = "vera-m2-task-execution"
+    Role = "ECSInfrastructure"
+  }
+}
+
+# AWS-managed policy that covers ECR pull + CloudWatch Logs writes.
+resource "aws_iam_role_policy_attachment" "task_execution_managed" {
+  role       = aws_iam_role.task_execution.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+# ----------------------------------------------------------------------------
+# IAM — Task Role (used by the app code inside the container)
+# ----------------------------------------------------------------------------
+# Least-privilege: only what the gateway actually needs at runtime.
+
+resource "aws_iam_role" "task" {
+  name               = "vera-m2-task"
+  assume_role_policy = data.aws_iam_policy_document.ecs_tasks_assume.json
+
+  tags = {
+    Name = "vera-m2-task"
+    Role = "ApplicationRuntime"
+  }
+}
+
+data "aws_iam_policy_document" "task_app" {
+  # Nova Sonic — the only Bedrock model this gateway talks to.
+  # bedrock:InvokeModel is the action; InvokeModelWithBidirectionalStream
+  # is the API but it maps to this single IAM action.
+  statement {
+    sid       = "NovaSonicInvoke"
+    actions   = ["bedrock:InvokeModel"]
+    resources = [var.nova_sonic_model_arn]
+  }
+
+  # Optional: write app-level logs if the gateway code uses boto3 logs
+  # client directly (uncommon in Fargate — the container's stdout is
+  # already captured by the execution role's CloudWatch wiring).
+  # Left here as a stub — uncomment only if the app needs it.
+  #
+  # statement {
+  #   sid       = "AppLogs"
+  #   actions   = ["logs:PutLogEvents", "logs:CreateLogStream"]
+  #   resources = ["${aws_cloudwatch_log_group.gateway.arn}:*"]
+  # }
+}
+
+resource "aws_iam_role_policy" "task_app" {
+  name   = "vera-m2-task-app"
+  role   = aws_iam_role.task.id
+  policy = data.aws_iam_policy_document.task_app.json
+}
