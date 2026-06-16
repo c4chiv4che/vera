@@ -16,9 +16,9 @@ cdk.out/
 
 # Secrets & local config — NUNCA commitear
 .env
-.env.local
 **/.env
-**/.env.local
+*.local
+**/*.local
 *.tfvars
 *.tfvars.json
 .terraform/
