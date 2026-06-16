@@ -23,10 +23,13 @@ verified by inspection only, and what moves to M2:
   - Exercise the output vocalization path against Amazon Connect as
     a real SIP peer (natural VAD closes user turns, Nova vocalizes,
     `frames_out > 0` becomes observable for the first time).
-  - Speech-input quality with a non-synthetic voice (espeak proved
+  - ~~Speech-input quality with a non-synthetic voice (espeak proved
     too robotic for digit transcription against Nova STT — see
     M1.2b Finding 1; piper-tts or real human voice expected to
-    resolve).
+    resolve).~~ **RESOLVED post-M1.2b via piper follow-up**: piper-tts
+    transcribes all 8 DNI digits cleanly against Nova STT; M2 adopts
+    piper as the synthetic-voice test backend. Detail in M1.2b
+    Finding 1.
   - RTP behaviour on ECS host-networking (WSL2 is not a proxy for
     production network conditions; flagged up-front in
     Environment).
@@ -419,23 +422,58 @@ WebSocket path's `WebSocketAudioOutput` (`server.py:374-389`), which
 already works end-to-end in production; `frames_out=0` is not a
 wiring bug.
 
-**Finding 1 — TTS PARTIAL (known, expected, harness-side).**
+**Finding 1 — TTS PARTIAL → VALIDATED via piper follow-up.**
 
-espeak-ng's synthetic voice did not yield clean digit transcription
-against Nova Sonic STT. Observed errors in the first-run transcript:
+First-run diagnostic (espeak-ng): synthetic voice did not yield
+clean digit transcription against Nova Sonic STT. Observed errors:
 
 - "Mi D N I es" → transcribed as "mi nombre es Pedro".
 - "tres uno dos tres" → transcribed as "noventa y tres".
 
-Cause: synthetic voice with insufficient prosody between digits. No
-spike-code action; the synth pipeline is doing what we asked.
+Cause hypothesised at the time: synthetic voice with insufficient
+prosody between digits. No spike-code action; the synth pipeline was
+doing what we asked.
 
-**Action (deferred, NOT for M1.2b closing):** upgrade to piper-tts
-(neural voice) or tune espeak prosody (`--pitch`, explicit pauses
-between digits like "uno, dos, tres"). Note for M2: caracterizing
-the range of voice qualities that the SIP leg tolerates is a real
-test target, but it belongs to integration testing against Connect,
-not to spike validation.
+**Follow-up run (piper-tts, neural Spanish voice `es_MX-ald-medium`),
+same input text, same canonical pjsua command:**
+
+```
+spike server stats : frames_in=599  frames_dropped_pre_bind=0
+                     frames_out=0   (Finding 2 unchanged — harness limit)
+transcript (espeak): "mi nombre es pedro noventa y tres cuatro cinco
+                      / seis siete"
+transcript (piper) : "mi dn es tres uno dos / tres cuatro cinco
+                      seis siete"
+```
+
+All 8 DNI digits transcribed correctly and in order by Nova STT with
+piper as the voice. The root cause was the TTS side, **not** Nova
+Sonic STT: with a neural voice and natural digit prosody, Nova
+transcribes Spanish digits cleanly. `frames_in=599` (vs 400 in the
+original M1.2b run) reflects a slightly longer WAV; the
+`frames_dropped_pre_bind=0` / `frames_out=0` shape is unchanged from
+the original run — Finding 2 (end-of-turn signaling) is independent
+and still applies to this harness.
+
+**Minor observation (NOT a blocker):** Nova concatenated the spelled
+letters "D N I" into "dn" in the transcript. Not a production issue —
+human callers say "DNI" naturally, not spelled out. Recorded here only
+for completeness; no action.
+
+**Status:** piper-tts adopted as the synthetic-voice test backend for
+any future spike work and for M2's pre-Connect integration runs that
+need a controlled-input voice. The "characterize TTS-vs-Nova quality"
+target is closed for digit transcription; broader phonetic coverage
+remains naturally an M2 integration concern, but no longer a spike
+blocker.
+
+**Install note — piper-tts 1.4.2 model JSON bug.** The
+`es_MX-ald-medium.onnx.json` shipped from Hugging Face omits the
+`phoneme_type` field, and piper 1.4.2 fails to load the model without
+it. Workaround: edit the JSON and add `"phoneme_type": "espeak"` at
+top level (a `.orig` copy of the unpatched JSON is preserved next to
+the model). M2 should either pin a piper release that handles the
+missing field, or carry the patched JSON in the test artifacts.
 
 **Finding 2 — end-of-turn signaling absent on the SIP leg
 (architectural, NOT a b1 bug — M2 verification needed).**
@@ -539,9 +577,11 @@ provides exactly that via the natural VAD of a real caller. The
   evidence we have today — they would solve a problem the test
   harness has, not a problem b1 has.
 
-**Finding 1 (TTS PARTIAL) remains as documented**: switch to
-piper-tts before re-running any synthetic-voice test against Nova.
-Independent of M1.2b closing.
+**Finding 1 update (post-M1.2b follow-up):** piper-tts validated
+against Nova STT — all 8 DNI digits transcribed cleanly. Original
+"TTS PARTIAL" status closed. piper is the synthetic-voice backend
+for any future spike or M2 pre-Connect test that needs controlled
+input. Detail and counters in Finding 1 above.
 
 **Findings note — the same pattern, third time.** M1.2a wave 1
 (silent drops), M1.2a wave 2 (truncated WAV header), M1.2b
@@ -636,10 +676,13 @@ wiring-side blocker in the way."
   investigate end-of-turn explicitly (Strands-level API or RTP-level
   VAD on the gateway). Do not preemptively build either workaround
   on harness-side evidence.
-- **Speech-input quality with a non-synthetic voice.** espeak proved
+- ~~**Speech-input quality with a non-synthetic voice.** espeak proved
   too robotic for digit transcription against Nova STT (M1.2b
   Finding 1). Switch to piper-tts or real-caller voice before
-  drawing any conclusions about Nova STT quality.
+  drawing any conclusions about Nova STT quality.~~ **RESOLVED via
+  M1.2b piper follow-up.** piper-tts transcribes Spanish digits
+  cleanly against Nova STT; root cause was the TTS, not Nova. M2
+  uses piper as the synthetic-voice test backend.
 - **RTP behaviour on ECS host-networking.** WSL2 is not a proxy for
   production network conditions (caveat reserved in Environment).
   Verify under the production network shape before declaring b1
