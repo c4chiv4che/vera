@@ -902,3 +902,109 @@ shape).
 **Status.** D2 closed → b1. M1 closed. M2 planning starts with the
 scope above. No infra, no cost incurred (the spike ran entirely on
 the dev machine).
+
+## 2026-06 — Phase D (M2 plan): Production telephony stack — infrastructure base provisioned, gateway image and stable endpoint deferred
+
+**Context.** M1 closed with D2 resolved toward b1 (Python pjsua2 +
+Strands in-process) and explicit M2 scope: exercise output
+vocalization against Connect as the real SIP peer, replace the WSL2
+spike code with a production gateway, and stand up the AWS
+infrastructure to host it. M2 also inherited the operational blocker
+identified mid-M1: the "External voice transfer connectors per
+account" quota (code `L-2BE4D75F`) is at 0 in the shared account/
+region. The other team's open case requests 1; a quota of ≥2 is
+required so both teams can create their connectors. Coordination
+to raise the desired value is in progress.
+
+**Architecture decided (not yet exercised against a real caller).**
+- Deploy target: ECS Fargate from day one. No EC2 stepping stone,
+  no temporary tunnel from the dev machine. The reasoning: the
+  M1.0 install recipe is non-trivial (build pjproject + SWIG from
+  source); Fargate forces us to confront the production container
+  shape early, instead of building twice.
+- Networking: dedicated VPC (10.0.0.0/16), two public subnets in
+  two AZs, Internet Gateway, no NAT Gateway. Tasks receive public
+  IPs directly. The default VPC stays untouched.
+- Filtering: dedicated security group for the gateway, UDP 5060
+  (SIP signaling) and UDP 10000-20000 (RTP media) open from
+  `var.allowed_sip_cidrs`, defaulting to `0.0.0.0/0` during
+  iteration. A code-level TODO pins migration to the documented
+  Chime/Connect CIDR ranges before production traffic.
+- Identity: two IAM roles, both assumed by `ecs-tasks.amazonaws.com`.
+  Task execution role attaches the AWS-managed
+  `AmazonECSTaskExecutionRolePolicy` (ECR pull + CloudWatch logs).
+  Task role carries a single inline statement:
+  `bedrock:InvokeModel` scoped to the Nova Sonic model ARN
+  specifically — not `*`. Verified against the AWS Bedrock
+  documentation; `InvokeModelWithBidirectionalStream` requires
+  this exact IAM action.
+- Image registry: ECR repository with `scan_on_push=true` and a
+  lifecycle policy keeping the 10 most recent images. `MUTABLE`
+  during POC; production will flip to `IMMUTABLE`.
+- Observability: CloudWatch log group with 7-day retention,
+  wired to the task definition via the `awslogs` driver.
+- State management: Terraform with S3 remote backend
+  (`vera-tf-state-<account>`), native S3 lockfile
+  (`use_lockfile=true`). The bootstrap (bucket + dynamo table)
+  is out-of-band; everything else is IaC.
+
+**Exercised end-to-end against AWS.**
+- Full Terraform cycle on the ECS stack: init → plan → apply →
+  destroy, all clean, no orphaned resources, no manual cleanup
+  needed.
+- A Fargate task with a placeholder image (`public.ecr.aws/nginx/
+  nginx:latest`) reached `LastStatus=RUNNING` on first apply,
+  received a public IP from a public subnet, and streamed its
+  startup banner to CloudWatch via the `awslogs` driver. This
+  proves the lifecycle ECS → ECR pull → container start → log
+  group is fully wired. The placeholder is not a SIP service;
+  the proof is the lifecycle, not the protocol.
+- Two-stack separation under live destroy: tearing down `infra/m2/`
+  left the older `infra/crm/` stack (Lambda + API Gateway +
+  DynamoDB from a prior phase) untouched. Validates that the
+  per-stack state isolation works.
+
+**Verified by code-level inspection, NOT exercised yet.**
+- Container image for the real gateway. Multi-stage Dockerfile
+  (builder compiles pjproject + SWIG against a PINNED tag — M1's
+  `2.17-dev` was a moving target, not acceptable in production)
+  is designed but not built. The task definition references a
+  variable `gateway_image_placeholder` precisely so the swap is
+  a one-line change.
+- Stable endpoint for Connect. The Fargate task's public IP
+  changes on every redeploy; Connect needs a fixed target. A
+  Network Load Balancer in front of the service is the planned
+  shape (~$16/month idle); deferred to the next M2 commit.
+
+**Pending M2 (production-fidelity verification).**
+- Exercise output vocalization against Connect as the SIP peer
+  (inherited from M1). Until the quota is raised and the
+  External Voice Transfer Connector is created, this cannot
+  start.
+- Replace `espeak` with `piper-tts` in the gateway runtime. The
+  piper validation already happened on the spike branch
+  (`ece51fe` on `spike/m1.2b-piper-followup`); production
+  integration is the M2 carry-over, not new research.
+- RTP behavior on ECS host-networking with real PSTN traffic.
+
+**Cost posture.** The Terraform stack incurs zero recurring cost
+when destroyed (only the out-of-band S3 + DynamoDB remain, both
+pennies/month). Standing it up adds: Fargate task 512 CPU/1024 MB
+≈ $9/month at 24/7, NLB ≈ $16/month idle once added, Bedrock
+Nova Sonic per-minute on inference, CloudWatch logs at retention.
+The pattern adopted for this phase: apply → validate → destroy
+within a session if there's no continuous caller traffic, so the
+meter only runs during active testing.
+
+**Blocker for protocol-level progress.** Quota `L-2BE4D75F` at 0
+in the shared account. Coordination with the other team to raise
+the desired value to ≥2 is the critical path. No amount of
+infrastructure work moves the SIP leg forward until the connector
+exists.
+
+**Status.** Infrastructure base committed and destroy-validated
+on branch `feat/m2-infra` (7 local commits, not pushed). The
+stack rebuilds from `terraform apply` in ~2 minutes. NLB,
+production image, and Connect-side connector remain. M2 stays
+open.
+
