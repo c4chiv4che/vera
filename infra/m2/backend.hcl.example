@@ -3,5 +3,5 @@
 bucket         = "vera-tf-state-<ACCOUNT_ID>"
 key            = "infra/terraform.tfstate"
 region         = "us-east-1"
-dynamodb_table = "vera-tf-locks"
+use_lockfile   = true
 encrypt        = true
