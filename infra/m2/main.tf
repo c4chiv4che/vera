@@ -74,3 +74,47 @@ resource "aws_route_table_association" "public" {
   subnet_id      = aws_subnet.public[count.index].id
   route_table_id = aws_route_table.public.id
 }
+
+# ----------------------------------------------------------------------------
+# Security group for the SIP/RTP gateway
+# ----------------------------------------------------------------------------
+
+resource "aws_security_group" "gateway" {
+  name        = "vera-m2-gateway-sg"
+  description = "SIP signaling + RTP media for the Vera telephony gateway"
+  vpc_id      = aws_vpc.main.id
+
+  tags = {
+    Name = "vera-m2-gateway-sg"
+  }
+}
+
+# SIP signaling
+resource "aws_vpc_security_group_ingress_rule" "sip_udp" {
+  for_each          = toset(var.allowed_sip_cidrs)
+  security_group_id = aws_security_group.gateway.id
+  description       = "SIP signaling (UDP 5060)"
+  ip_protocol       = "udp"
+  from_port         = 5060
+  to_port           = 5060
+  cidr_ipv4         = each.value
+}
+
+# RTP media (pjsua default range)
+resource "aws_vpc_security_group_ingress_rule" "rtp_udp" {
+  for_each          = toset(var.allowed_sip_cidrs)
+  security_group_id = aws_security_group.gateway.id
+  description       = "RTP media (UDP 10000-20000)"
+  ip_protocol       = "udp"
+  from_port         = 10000
+  to_port           = 20000
+  cidr_ipv4         = each.value
+}
+
+# Egress: everything (Bedrock, CloudWatch, ECR, SIP back to Connect)
+resource "aws_vpc_security_group_egress_rule" "all_outbound" {
+  security_group_id = aws_security_group.gateway.id
+  description       = "Allow all outbound traffic"
+  ip_protocol       = "-1"
+  cidr_ipv4         = "0.0.0.0/0"
+}

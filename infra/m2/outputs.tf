@@ -12,3 +12,8 @@ output "vpc_cidr" {
   value       = aws_vpc.main.cidr_block
   description = "CIDR block of the VPC"
 }
+
+output "gateway_security_group_id" {
+  value       = aws_security_group.gateway.id
+  description = "Security group ID for the Vera SIP/RTP gateway"
+}
