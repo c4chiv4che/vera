@@ -233,3 +233,128 @@ resource "aws_ecr_lifecycle_policy" "gateway" {
     ]
   })
 }
+
+# ----------------------------------------------------------------------------
+# CloudWatch Log Group for the gateway task
+# ----------------------------------------------------------------------------
+
+resource "aws_cloudwatch_log_group" "gateway" {
+  name              = "/ecs/vera-m2-gateway"
+  retention_in_days = 7
+
+  tags = {
+    Name = "vera-m2-gateway-logs"
+  }
+}
+
+# ----------------------------------------------------------------------------
+# ECS — Cluster + Task Definition + Service (Fargate)
+# ----------------------------------------------------------------------------
+
+resource "aws_ecs_cluster" "main" {
+  name = "vera-m2"
+
+  setting {
+    name  = "containerInsights"
+    value = "disabled" # paid feature, off for POC
+  }
+
+  tags = {
+    Name = "vera-m2-cluster"
+  }
+}
+
+# Cluster capacity providers — Fargate only, no Spot for now.
+resource "aws_ecs_cluster_capacity_providers" "main" {
+  cluster_name       = aws_ecs_cluster.main.name
+  capacity_providers = ["FARGATE"]
+
+  default_capacity_provider_strategy {
+    capacity_provider = "FARGATE"
+    weight            = 1
+  }
+}
+
+# Task definition — placeholder image while the real gateway is being built.
+# TODO(M2-image): replace image with ${aws_ecr_repository.gateway.repository_url}:latest
+# once we push the first gateway image to ECR.
+resource "aws_ecs_task_definition" "gateway" {
+  family                   = "vera-m2-gateway"
+  cpu                      = var.task_cpu
+  memory                   = var.task_memory
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+
+  execution_role_arn = aws_iam_role.task_execution.arn
+  task_role_arn      = aws_iam_role.task.arn
+
+  container_definitions = jsonencode([
+    {
+      name      = "gateway"
+      image     = var.gateway_image_placeholder
+      essential = true
+
+      portMappings = [
+        # SIP signaling
+        {
+          containerPort = 5060
+          hostPort      = 5060
+          protocol      = "udp"
+        }
+        # RTP port range is NOT declared here on purpose: ECS task def
+        # accepts only single ports, not ranges. The security group
+        # opens 10000-20000 already; the container binds whichever
+        # ports pjsua decides at runtime within that range.
+      ]
+
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = aws_cloudwatch_log_group.gateway.name
+          "awslogs-region"        = var.region
+          "awslogs-stream-prefix" = "gateway"
+        }
+      }
+    }
+  ])
+
+  tags = {
+    Name = "vera-m2-gateway-taskdef"
+  }
+}
+
+# Service — 1 task always running, in our public subnets, with the
+# gateway SG. Public IPs are assigned automatically (no NLB yet —
+# Connect will reach the task directly via its public IP once we
+# wire the External Voice Transfer Connector).
+resource "aws_ecs_service" "gateway" {
+  name            = "vera-m2-gateway"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.gateway.arn
+  desired_count   = 1
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets          = aws_subnet.public[*].id
+    security_groups  = [aws_security_group.gateway.id]
+    assign_public_ip = true
+  }
+
+  deployment_minimum_healthy_percent = 100
+  deployment_maximum_percent         = 200
+
+  # Wait for steady state but don't fail terraform if it takes long
+  # (Fargate cold-start can be 30-60s).
+  wait_for_steady_state = false
+
+  tags = {
+    Name = "vera-m2-gateway-service"
+  }
+
+  # If the task definition changes outside Terraform (e.g. by a
+  # CI/CD pipeline that pushes a new image revision), don't fight
+  # over it. For now we don't have CI/CD, so leave commented.
+  # lifecycle {
+  #   ignore_changes = [task_definition]
+  # }
+}

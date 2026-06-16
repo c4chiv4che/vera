@@ -26,3 +26,26 @@ variable "nova_sonic_model_arn" {
   type        = string
   default     = "arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-sonic-v1:0"
 }
+
+variable "task_cpu" {
+  description = "Fargate task CPU units (256, 512, 1024, ...)"
+  type        = string
+  default     = "512"
+}
+
+variable "task_memory" {
+  description = "Fargate task memory in MB. Must be compatible with task_cpu (see AWS docs)."
+  type        = string
+  default     = "1024"
+}
+
+# Placeholder image to validate the ECS wiring works end-to-end before we
+# have a real gateway image. nginx is public, tiny, listens on 80 (not
+# what SIP needs, but the goal is to see RUNNING + logs flowing).
+# TODO(M2-image): replace with the ECR URL + tag once the gateway image
+# is pushed.
+variable "gateway_image_placeholder" {
+  description = "Placeholder Docker image for the gateway service (used until we push the real one to ECR)"
+  type        = string
+  default     = "public.ecr.aws/nginx/nginx:latest"
+}

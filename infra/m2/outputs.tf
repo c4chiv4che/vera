@@ -32,3 +32,18 @@ output "ecr_repository_url" {
   value       = aws_ecr_repository.gateway.repository_url
   description = "ECR repository URL for the gateway image (use for docker push)"
 }
+
+output "log_group_name" {
+  value       = aws_cloudwatch_log_group.gateway.name
+  description = "CloudWatch log group for the gateway task"
+}
+
+output "ecs_cluster_name" {
+  value       = aws_ecs_cluster.main.name
+  description = "ECS cluster name"
+}
+
+output "ecs_service_name" {
+  value       = aws_ecs_service.gateway.name
+  description = "ECS service name (for force-new-deployment commands)"
+}
