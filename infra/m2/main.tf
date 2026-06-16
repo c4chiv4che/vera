@@ -193,3 +193,43 @@ resource "aws_iam_role_policy" "task_app" {
   role   = aws_iam_role.task.id
   policy = data.aws_iam_policy_document.task_app.json
 }
+
+# ----------------------------------------------------------------------------
+# ECR — registry for the gateway Docker image
+# ----------------------------------------------------------------------------
+
+resource "aws_ecr_repository" "gateway" {
+  name                 = "vera-m2-gateway"
+  image_tag_mutability = "MUTABLE" # MUTABLE during POC; switch to IMMUTABLE for prod
+  force_delete         = true      # allow terraform destroy even if images present
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+
+  tags = {
+    Name = "vera-m2-gateway"
+  }
+}
+
+# Lifecycle policy: keep the 10 most recent images, expire the rest.
+resource "aws_ecr_lifecycle_policy" "gateway" {
+  repository = aws_ecr_repository.gateway.name
+
+  policy = jsonencode({
+    rules = [
+      {
+        rulePriority = 1
+        description  = "Keep the 10 most recent images"
+        selection = {
+          tagStatus   = "any"
+          countType   = "imageCountMoreThan"
+          countNumber = 10
+        }
+        action = {
+          type = "expire"
+        }
+      }
+    ]
+  })
+}

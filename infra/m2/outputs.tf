@@ -27,3 +27,8 @@ output "task_role_arn" {
   value       = aws_iam_role.task.arn
   description = "ARN of the ECS task role (used by the app at runtime)"
 }
+
+output "ecr_repository_url" {
+  value       = aws_ecr_repository.gateway.repository_url
+  description = "ECR repository URL for the gateway image (use for docker push)"
+}
