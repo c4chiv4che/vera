@@ -1133,3 +1133,81 @@ it now move from "Verified by inspection" to "Exercised end-to-end."
 The rest of the M2 plan above stays open exactly as written; M2.1
 narrows the surface area for the next milestone but does not
 collapse it.
+
+
+## 2026-06-19 — Phase D / M2.2 plan: stable SIP/RTP endpoint via EC2 + EIP
+
+### Context
+
+M2.1 closed with the gateway image exercising on Fargate (commit `0ebc100`). What that did NOT prove: that the image can be reached from the outside world on a stable address — Fargate tasks get ephemeral public IPs that change on every redeploy, and that is incompatible with the way Amazon Connect's External Voice Transfer Connector works (Connect's "Outbound routes" require a static `Host:Port` per route — they accept IP or FQDN, up to 10 routes with priority/weight, but each route is a fixed destination).
+
+M2.2 is about making the endpoint addressable from Connect.
+
+### Investigation summary
+
+Before deciding, surveyed how AWS itself recommends shipping a SIP/RTP gateway:
+
+- **`aws-samples/sample-s2s-voip-gateway`** (10 stars, Java + mjSIP + Nova Sonic): ships two CDK variants. `cdk-ec2-instance` (single EC2, "the recommended approach for development and testing changes") and `cdk-ecs` (EC2-backed ECS in host networking mode, more operational). The README is explicit about why host networking is required: *"This enables it to bind large UDP port ranges that are required for RTP."* Fargate is not used in either variant.
+
+- **`aws-samples/sample-sonic-cdk-agent`** (65 stars, Python + Nova Sonic): a different shape entirely — frontend on CloudFront/S3, backend on ECS, WebSocket through NLB, Cognito auth. NLB works fine here because the protocol is WebSocket over TCP (single listener, well within the 50-listener hard cap). This sample applies to the browser path of our agent, not to telephony.
+
+- **NLB for SIP/RTP**: confirmed twice — hard limit of 50 listeners makes the UDP range 10000-20000 (~10,000 ports) impossible to expose via one NLB. AWS official answer for this scenario in re:Post: *"the only viable option, without major architectural changes, is to use multiple NLBs."* Discarded.
+
+- **Global Accelerator with port ranges**: technically supports port ranges (validated by the AWS blog on RTC with Global Accelerator — UDP 5060 + 16384–32767 in their example). Overkill for a single-instance POC, useful at scale or for multi-region.
+
+### Decision
+
+**Compute: single EC2 with Docker host networking. Endpoint: Elastic IP. Access: SSM Session Manager (no SSH). Logging: Docker awslogs driver to CloudWatch.**
+
+The simplest shape that solves the stable-endpoint problem and matches what AWS recommends for dev/test of SIP/RTP gateways. No NLB, no Global Accelerator, no SBC, no Chime SDK Voice Connector adjacent to Connect (Connect already has its Chime backend internally).
+
+### What changes vs M2.1
+
+Removed from `infra/m2/`:
+- `aws_ecs_cluster`, `aws_ecs_cluster_capacity_providers`
+- `aws_ecs_task_definition`
+- `aws_ecs_service`
+- `task_cpu`, `task_memory`, `desired_count` variables
+
+Added:
+- `aws_iam_instance_profile.gateway` wrapping the task role
+- `aws_iam_role_policy_attachment` for `AmazonSSMManagedInstanceCore` (SSM Session Manager access; no SSH keypair needed)
+- `aws_iam_role_policy_attachment` for `CloudWatchAgentServerPolicy` (Docker awslogs driver needs `logs:CreateLogStream`, `logs:PutLogEvents` — this managed policy grants both)
+- `data "aws_ami" "amazon_linux_2023"` for AMI lookup
+- `aws_instance.gateway` (t3.medium, 2 vCPU / 4 GB, public subnet, SG existente, instance profile, user_data installs Docker + pulls ECR image + runs container with `--network host --log-driver=awslogs`)
+- `aws_eip.gateway` + `aws_eip_association`
+
+Kept unchanged:
+- VPC + subnets + IGW + route table
+- Security group (UDP 5060 + UDP 10000-20000)
+- `aws_iam_role.task` (only trust policy changes: `ecs-tasks` → `ec2.amazonaws.com`); inline `bedrock:InvokeModel` policy on `nova-sonic-v1:0` stays
+- ECR repository
+- CloudWatch log group `/ecs/vera-m2-gateway` (Docker's awslogs driver writes here directly)
+
+### Trade-offs accepted
+
+- **No ECS control plane**. `aws ecs describe-services` is not available; observability of the container is via SSM Session Manager + `docker logs`, plus CloudWatch via Docker's `awslogs` driver.
+- **No auto-replacement**. If the EC2 dies, manual `terraform apply` to recreate. Acceptable for POC; production would use ECS-on-EC2 (the `cdk-ecs` variant of the AWS sample) for ASG-managed self-healing.
+- **t3.medium 24/7 cost**: ~$0.0416/hour ≈ $30/month if left running. Intermittent use (~8 h/day for testing): ~$10/month. Mitigation: `terraform destroy` after each validation session, same pattern as M2.1.
+- **EIP cost**: $0.005/hour (~$3.60/month) if not associated. The `aws_eip_association` keeps it associated while the instance lives; destroy releases it.
+- **t3.medium chosen over t3.small**: extra headroom for iterating on the gateway code (pjsua2 + Strands + future piper-tts) without resource-tuning friction. Difference: ~$15/month 24/7 between t3.small and t3.medium, negligible at POC scale and worth the friction reduction.
+
+### What M2.2 does NOT close
+
+- Real SIP INVITE handling (stub still auto-404s — that's M2.3).
+- Vocalization end-to-end vs Connect (still blocked by quota `L-2BE4D75F`, no movement since 2026-05-27).
+- piper-tts replacement of espeak (deferred).
+- pyaudio bloat in the image (deferred technical debt).
+
+M2.2 closes exactly: *"the gateway image now has a stable public IP that Connect can be configured to send INVITEs to."*
+
+### Verification plan
+
+After `terraform apply`:
+1. `aws ec2 describe-addresses` shows the EIP associated to the instance.
+2. `aws ssm start-session --target <instance-id>` connects to the EC2.
+3. `docker ps` shows the gateway container running.
+4. `docker logs vera-gateway` shows: stub starting, pjsua2 imported, Endpoint started (libVersion=2.17), UDP 5060 bound, heartbeats every 30s.
+5. `terraform apply` a second time produces no changes — the EIP is the same. **This is the critical property M2.2 must prove**: stability across deploys.
+6. CloudWatch log group receives the container's stdout via the awslogs driver — same place M2.1 logs landed.
+7. `terraform destroy` clean; cost returns to $0.
