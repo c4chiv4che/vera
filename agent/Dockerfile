@@ -22,7 +22,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         swig \
         libssl-dev \
         libasound2-dev \
+        portaudio19-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# setuptools is required by pjproject SWIG's setup.py; distutils
+# was removed from Python 3.12 so we explicitly install it.
+RUN pip install --no-cache-dir setuptools wheel
 
 # Compile pjproject
 ARG PJPROJECT_TAG
@@ -46,7 +51,7 @@ RUN pip install --no-cache-dir uv
 
 # uv-sync the vera package
 WORKDIR /app
-COPY agent/app/vera/pyproject.toml agent/app/vera/uv.lock ./
+COPY agent/app/vera/ ./
 RUN uv sync --frozen --no-dev
 
 # -------- Stage 2: runtime --------
@@ -56,20 +61,32 @@ FROM python:3.12-slim-bookworm AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libssl3 \
         libasound2 \
+        libportaudio2 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy compiled pjproject shared libraries from builder
-COPY --from=builder /usr/local/lib/libpj*.so* /usr/local/lib/
-# pjsua2 Python module: paths below are the typical destination of
-# `setup.py install` on python:3.12-bookworm. If `docker build` shows
-# them empty, we'll fix here once we see the actual install location.
-COPY --from=builder /usr/local/lib/python3.12/site-packages/pjsua2*.so /usr/local/lib/python3.12/site-packages/
-COPY --from=builder /usr/local/lib/python3.12/site-packages/pjsua2.py /usr/local/lib/python3.12/site-packages/
-RUN ldconfig
-
-# Copy the uv-managed venv from builder
+# Copy compiled pjproject shared libraries AND its third_party deps
+# from the builder. The libpj* glob alone misses libsrtp, libspeex,
+# libresample, libwebrtc, libgsmcodec, libilbccodec — all linked by
+# the _pjsua2 extension. Using a broader glob avoids re-discovering
+# this every time pjproject adds a codec.
+COPY --from=builder /usr/local/lib/*.so* /usr/local/lib/
+# Copy the uv-managed venv from builder first, so we can drop
+# pjsua2 INTO it on the next step (order matters — copying the venv
+# after the pjsua2 copy would overwrite it).
 COPY --from=builder /app/.venv /app/.venv
 ENV PATH="/app/.venv/bin:$PATH"
+
+# pjsua2 Python bindings from the SWIG build in the builder stage:
+#   - pjsua2.py: the Python wrapper module
+#   - _pjsua2.cpython-312-x86_64-linux-gnu.so: the C extension (33MB)
+#   - pjsua2-X.Y-py3.12.egg-info/: metadata directory
+# Copied INTO the venv (not the system site-packages) because the
+# venv has an isolated sys.path that does not look at the global Python
+# site-packages by design. Verified empirically in iteration 5:
+# files at /usr/local/lib/python3.12/site-packages were on disk but
+# CMD's `python -m bidi.gateway_stub` could not import them.
+COPY --from=builder /usr/local/lib/python3.12/site-packages/*pjsua2* /app/.venv/lib/python3.12/site-packages/
+RUN ldconfig
 
 # Copy vera source code
 WORKDIR /app
