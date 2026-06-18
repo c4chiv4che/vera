@@ -105,7 +105,7 @@ flowchart TB
 
     UI -->|HTTP / SSE| BFF
     BFF -->|AGUI protocol| AGENT
-    AGENT -->|@tool calls HTTPS| APIGW
+    AGENT -->|"@tool calls HTTPS"| APIGW
     APIGW --> LAMBDA
     LAMBDA --> DDB
     AGENT -->|invokeModel| BEDROCK
@@ -141,7 +141,7 @@ flowchart TB
     UI2 -.->|UI events| BFF2
     BIDI <-->|bidi stream| AGENT2
     AGENT2 <-->|InvokeModelWithBidirectionalStream| NOVA
-    AGENT2 -->|@tool calls| CRM
+    AGENT2 -->|"@tool calls"| CRM
     AGENT2 -->|AGUI events| BFF2
 ```
 
