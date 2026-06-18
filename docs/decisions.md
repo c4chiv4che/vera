@@ -1135,7 +1135,7 @@ narrows the surface area for the next milestone but does not
 collapse it.
 
 
-## 2026-06-19 — Phase D / M2.2 plan: stable SIP/RTP endpoint via EC2 + EIP
+## 2026-06-18 — Phase D / M2.2 plan: stable SIP/RTP endpoint via EC2 + EIP
 
 ### Context
 
@@ -1211,3 +1211,54 @@ After `terraform apply`:
 5. `terraform apply` a second time produces no changes — the EIP is the same. **This is the critical property M2.2 must prove**: stability across deploys.
 6. CloudWatch log group receives the container's stdout via the awslogs driver — same place M2.1 logs landed.
 7. `terraform destroy` clean; cost returns to $0.
+
+
+## 2026-06-18 — Phase D / M2.2: stable SIP/RTP endpoint validated end-to-end
+
+### Status
+
+**CLOSED.** The gateway image, deployed on EC2 with Docker host networking and an Elastic IP, exercised end-to-end. The M2.2 invariant — "the gateway image now has a stable public IP that Connect can be configured to send INVITEs to" — holds.
+
+### Exercised end-to-end
+
+`terraform apply` from scratch over a clean state (M2.1 destroyed the day before) produced the full stack: VPC + subnets + IGW + route table + SG with UDP 5060 + 10000-20000 rules + IAM role with the four-statement task_app policy (Nova Sonic Bedrock + AwsLogsDriver + EcrAuth + EcrPull) + instance profile + ECR repo with the existing M2.1 image pushed + CloudWatch log group + EC2 (t3.medium, Amazon Linux 2023, IMDSv2, gp3 20GB encrypted) + EIP `32.198.137.173` + EIP association. 20 resources, applied in two phases (17 with `-target` for ECR-first to seed the registry, then 3 for the EC2/EIP layer that depends on the image being already in ECR).
+
+The user_data script ran on first boot: dnf installed Docker, waited for the daemon, logged into ECR using the instance profile credentials, pulled the gateway image, and ran the container with `--network host --log-driver=awslogs`. Total elapsed from `Apply complete` to first heartbeat in CloudWatch: ~70 seconds. Logs landed in `/ecs/vera-m2-gateway` — the same log group M2.1 used, via Docker's awslogs driver instead of ECS task definition's logConfiguration.
+
+Container state was identical to M2.1 stub behavior on Fargate: `pjsua2 imported successfully`, `Endpoint started (libVersion=2.17)`, `UDP transport created on port 5060 (id=0)`, `stub ready; entering heartbeat loop`, followed by `alive` every 30s. Stable for the full validation window (6 consecutive heartbeats observed before destroy).
+
+### Invariant: EIP stability across applies
+
+`terraform apply` ran a second time over the live infrastructure. Output: `No changes. Your infrastructure matches the configuration.` The EIP did not change. The EC2's public IP equals the EIP (`EipPublic = PublicIp`), which means traffic reaching the gateway IP on port 5060/UDP from outside lands directly on the EC2 ENI without intermediate redirection. This is the property M2.2 had to prove and the property Fargate could not — Fargate gives ephemeral public IPs that change on every redeploy.
+
+### Findings
+
+**1. Apply in two phases is necessary on first deploy.** ECR repo is created in the same Terraform apply as the EC2 that pulls from it. The EC2's user_data does `docker pull` at boot time; if the repo is empty, the container never starts. Solution: `terraform apply -target=<everything except aws_instance/aws_eip>` to create the repo, then `docker push` to populate it, then full `terraform apply`. Once the repo has an image, all subsequent applies are single-pass. Noted in operational notes; not a code issue.
+
+**2. AWS_PROFILE drift on new terminal sessions.** Cost ~15 minutes of debugging: a `terraform plan` from a fresh shell defaulted to a different account, hit a 403 on the S3 state bucket, left a stale state lock, and required `force-unlock`. Added to the start-of-session ritual: `aws sts get-caller-identity --query Account --output text` should print the expected account before any Terraform command.
+
+**3. Cancelling `terraform apply` mid-flight leaves drift.** An interrupted apply created VPC + ECR + IAM + log group + EIP + instance profile but never reached subnets/SG rules/EC2. Terraform state captured some of those resources, not all. Cleanup required manual `aws ec2 delete-vpc` + `aws ec2 release-address` for the truly orphaned ones plus `terraform destroy` for what the state knew. **Operational rule going forward**: do not cancel a running apply — wait for completion, then destroy.
+
+**4. `user_data_replace_on_change = true` is correct for POC.** Any change to the user_data template (or to `var.gateway_image_tag` or `var.region`) causes Terraform to replace the EC2 entirely. That's deliberate: the only way to "deploy a new image" on this stack is to push to ECR with a new tag and let Terraform replace the instance, which is fine for one-instance POC. Production would decouple this via ECS-on-EC2 with rolling task replacement.
+
+### Cost posture
+
+t3.medium (~$0.0416/hr) + EIP-associated ($0 while attached to a running instance) + 20GB gp3 EBS (~$0.002/hr) ≈ $0.044/hour while running. The validation session (apply → idle → second-apply-test → destroy) ran for ~12 minutes ≈ $0.01. Post-destroy: $0 recurring.
+
+### What M2.2 does NOT close
+
+- **Real SIP INVITE handling**: the stub still does no `onCallState` callback, no `Account.onIncomingCall`, no `Call` instantiation. Connect's INVITEs would land but get nothing back (the pjsua2 default for unhandled INVITEs is a 404). That's M2.3.
+- **Vocalization end-to-end against Connect**: blocked by quota `L-2BE4D75F` (no movement since 2026-05-27, 23 days). The other team's ticket is in `CASE_OPENED` with `DesiredValue: 1`; we may need to coordinate to raise to 2 or open our own ticket.
+- **piper-tts**: still espeak in the image.
+- **pyaudio bloat**: still ~611MB image (~150MB content). Deferred technical debt.
+
+### What changed in `infra/m2/` vs M2.1
+
+Branch `feat/m2.2-ec2-eip` (3 commits before squash on merge to main):
+- `d9dc0ed` docs(decisions): M2.2 plan
+- `da8bc60` infra/m2: refactor from Fargate to EC2 + EIP for stable SIP/RTP endpoint
+- (this commit) docs(decisions): close M2.2
+
+The refactor removed the ECS layer (cluster + capacity providers + task def + service + execution role) and added the EC2 layer (AMI lookup + instance profile + EC2 + EIP + EIP association + new `user_data.sh.tpl`). The task role was preserved but its trust policy moved from `ecs-tasks.amazonaws.com` to `ec2.amazonaws.com`, and its inline policy gained three new statements (logs + ECR auth + ECR pull) that replace what `aws_iam_role.task_execution` did under ECS. Variables and outputs were refactored accordingly. `terraform fmt -check` clean, `terraform validate` Success — no syntactic or semantic issues.
+
+Connector to Connect is now a one-line config change on the Amazon Connect side, awaiting only the quota approval to be exercised.
