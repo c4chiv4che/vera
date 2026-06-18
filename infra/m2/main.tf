@@ -275,9 +275,12 @@ resource "aws_ecs_cluster_capacity_providers" "main" {
   }
 }
 
-# Task definition — placeholder image while the real gateway is being built.
-# TODO(M2-image): replace image with ${aws_ecr_repository.gateway.repository_url}:latest
-# once we push the first gateway image to ECR.
+# Task definition for the gateway. Image URI is built from the ECR
+# repository URL (resource-resolved, account ID never appears in the
+# source) plus the var.gateway_image_tag. To deploy a new image:
+# 1) docker push <ecr_url>:<tag>
+# 2) update var.gateway_image_tag (or rely on the default 'dev')
+# 3) terraform apply  — ECS does a rolling deploy with the new task def.
 resource "aws_ecs_task_definition" "gateway" {
   family                   = "vera-m2-gateway"
   cpu                      = var.task_cpu
@@ -291,7 +294,7 @@ resource "aws_ecs_task_definition" "gateway" {
   container_definitions = jsonencode([
     {
       name      = "gateway"
-      image     = var.gateway_image_placeholder
+      image     = "${aws_ecr_repository.gateway.repository_url}:${var.gateway_image_tag}"
       essential = true
 
       portMappings = [

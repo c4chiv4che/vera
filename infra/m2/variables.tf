@@ -39,13 +39,13 @@ variable "task_memory" {
   default     = "1024"
 }
 
-# Placeholder image to validate the ECS wiring works end-to-end before we
-# have a real gateway image. nginx is public, tiny, listens on 80 (not
-# what SIP needs, but the goal is to see RUNNING + logs flowing).
-# TODO(M2-image): replace with the ECR URL + tag once the gateway image
-# is pushed.
-variable "gateway_image_placeholder" {
-  description = "Placeholder Docker image for the gateway service (used until we push the real one to ECR)"
+# Image tag to deploy from the ECR repository. The full image URI is
+# constructed in main.tf as "${aws_ecr_repository.gateway.repository_url}:${var.gateway_image_tag}"
+# so the account ID stays out of the source tree.
+# 'dev' is the convention for the local-build tag pushed manually during
+# M2; a real CI pipeline would push tags like 'sha-<git>' or 'v1.2.3'.
+variable "gateway_image_tag" {
+  description = "Tag of the gateway image in ECR to deploy (e.g. 'dev', 'sha-abc123', 'v1.0.0')"
   type        = string
-  default     = "public.ecr.aws/nginx/nginx:latest"
+  default     = "dev"
 }
