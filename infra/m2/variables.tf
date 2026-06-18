@@ -27,18 +27,6 @@ variable "nova_sonic_model_arn" {
   default     = "arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-sonic-v1:0"
 }
 
-variable "task_cpu" {
-  description = "Fargate task CPU units (256, 512, 1024, ...)"
-  type        = string
-  default     = "512"
-}
-
-variable "task_memory" {
-  description = "Fargate task memory in MB. Must be compatible with task_cpu (see AWS docs)."
-  type        = string
-  default     = "1024"
-}
-
 # Image tag to deploy from the ECR repository. The full image URI is
 # constructed in main.tf as "${aws_ecr_repository.gateway.repository_url}:${var.gateway_image_tag}"
 # so the account ID stays out of the source tree.
@@ -48,4 +36,10 @@ variable "gateway_image_tag" {
   description = "Tag of the gateway image in ECR to deploy (e.g. 'dev', 'sha-abc123', 'v1.0.0')"
   type        = string
   default     = "dev"
+}
+
+variable "instance_type" {
+  description = "EC2 instance type for the gateway. t3.medium provides 2 vCPU / 4 GB RAM — enough headroom for pjsua2 + Strands + future piper-tts."
+  type        = string
+  default     = "t3.medium"
 }
