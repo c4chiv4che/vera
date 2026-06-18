@@ -18,14 +18,9 @@ output "gateway_security_group_id" {
   description = "Security group ID for the Vera SIP/RTP gateway"
 }
 
-output "task_execution_role_arn" {
-  value       = aws_iam_role.task_execution.arn
-  description = "ARN of the ECS task execution role (used by ECS to start tasks)"
-}
-
 output "task_role_arn" {
   value       = aws_iam_role.task.arn
-  description = "ARN of the ECS task role (used by the app at runtime)"
+  description = "ARN of the IAM role assumed by the gateway EC2 instance (via instance profile) — used by the app at runtime"
 }
 
 output "ecr_repository_url" {
@@ -38,12 +33,17 @@ output "log_group_name" {
   description = "CloudWatch log group for the gateway task"
 }
 
-output "ecs_cluster_name" {
-  value       = aws_ecs_cluster.main.name
-  description = "ECS cluster name"
+output "gateway_public_ip" {
+  value       = aws_eip.gateway.public_ip
+  description = "Stable public IP of the gateway — use in Connect's outbound route Host field"
 }
 
-output "ecs_service_name" {
-  value       = aws_ecs_service.gateway.name
-  description = "ECS service name (for force-new-deployment commands)"
+output "gateway_instance_id" {
+  value       = aws_instance.gateway.id
+  description = "EC2 instance ID — use for SSM Session Manager"
+}
+
+output "gateway_ssm_connect_command" {
+  value       = "aws ssm start-session --target ${aws_instance.gateway.id} --region ${var.region}"
+  description = "Ready-to-paste command for SSM Session Manager into the gateway"
 }

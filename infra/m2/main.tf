@@ -119,36 +119,14 @@ resource "aws_vpc_security_group_egress_rule" "all_outbound" {
   cidr_ipv4         = "0.0.0.0/0"
 }
 
-# ----------------------------------------------------------------------------
-# IAM — Task Execution Role (used by ECS itself to start the task)
-# ----------------------------------------------------------------------------
-# This role is assumed by the ECS agent on Fargate. It needs to pull the
-# image from ECR and write task-level logs to CloudWatch. Nothing app-level.
-
-data "aws_iam_policy_document" "ecs_tasks_assume" {
+data "aws_iam_policy_document" "ec2_assume" {
   statement {
     actions = ["sts:AssumeRole"]
     principals {
       type        = "Service"
-      identifiers = ["ecs-tasks.amazonaws.com"]
+      identifiers = ["ec2.amazonaws.com"]
     }
   }
-}
-
-resource "aws_iam_role" "task_execution" {
-  name               = "vera-m2-task-execution"
-  assume_role_policy = data.aws_iam_policy_document.ecs_tasks_assume.json
-
-  tags = {
-    Name = "vera-m2-task-execution"
-    Role = "ECSInfrastructure"
-  }
-}
-
-# AWS-managed policy that covers ECR pull + CloudWatch Logs writes.
-resource "aws_iam_role_policy_attachment" "task_execution_managed" {
-  role       = aws_iam_role.task_execution.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
 # ----------------------------------------------------------------------------
@@ -158,7 +136,7 @@ resource "aws_iam_role_policy_attachment" "task_execution_managed" {
 
 resource "aws_iam_role" "task" {
   name               = "vera-m2-task"
-  assume_role_policy = data.aws_iam_policy_document.ecs_tasks_assume.json
+  assume_role_policy = data.aws_iam_policy_document.ec2_assume.json
 
   tags = {
     Name = "vera-m2-task"
@@ -176,16 +154,35 @@ data "aws_iam_policy_document" "task_app" {
     resources = [var.nova_sonic_model_arn]
   }
 
-  # Optional: write app-level logs if the gateway code uses boto3 logs
-  # client directly (uncommon in Fargate — the container's stdout is
-  # already captured by the execution role's CloudWatch wiring).
-  # Left here as a stub — uncomment only if the app needs it.
-  #
-  # statement {
-  #   sid       = "AppLogs"
-  #   actions   = ["logs:PutLogEvents", "logs:CreateLogStream"]
-  #   resources = ["${aws_cloudwatch_log_group.gateway.arn}:*"]
-  # }
+  # Docker's awslogs driver writes container stdout/stderr to this log
+  # group. Scoped to the specific log group ARN — least privilege.
+  statement {
+    sid = "AwsLogsDriver"
+    actions = [
+      "logs:CreateLogStream",
+      "logs:PutLogEvents",
+    ]
+    resources = ["${aws_cloudwatch_log_group.gateway.arn}:*"]
+  }
+
+  # ECR pull — replaces the previous task execution role (gone with
+  # Fargate). GetAuthorizationToken doesn't support resource-level
+  # constraints, so it's scoped to *. The rest are scoped to our repo.
+  statement {
+    sid       = "EcrAuth"
+    actions   = ["ecr:GetAuthorizationToken"]
+    resources = ["*"]
+  }
+
+  statement {
+    sid = "EcrPull"
+    actions = [
+      "ecr:BatchCheckLayerAvailability",
+      "ecr:GetDownloadUrlForLayer",
+      "ecr:BatchGetImage",
+    ]
+    resources = [aws_ecr_repository.gateway.arn]
+  }
 }
 
 resource "aws_iam_role_policy" "task_app" {
@@ -248,116 +245,98 @@ resource "aws_cloudwatch_log_group" "gateway" {
 }
 
 # ----------------------------------------------------------------------------
-# ECS — Cluster + Task Definition + Service (Fargate)
+# AMI — Amazon Linux 2023 (latest stable, x86_64, HVM, Amazon-owned)
 # ----------------------------------------------------------------------------
 
-resource "aws_ecs_cluster" "main" {
-  name = "vera-m2"
+data "aws_ami" "amazon_linux_2023" {
+  most_recent = true
+  owners      = ["amazon"]
 
-  setting {
-    name  = "containerInsights"
-    value = "disabled" # paid feature, off for POC
+  filter {
+    name   = "name"
+    values = ["al2023-ami-2023*-x86_64"]
   }
 
-  tags = {
-    Name = "vera-m2-cluster"
+  filter {
+    name   = "architecture"
+    values = ["x86_64"]
   }
-}
 
-# Cluster capacity providers — Fargate only, no Spot for now.
-resource "aws_ecs_cluster_capacity_providers" "main" {
-  cluster_name       = aws_ecs_cluster.main.name
-  capacity_providers = ["FARGATE"]
-
-  default_capacity_provider_strategy {
-    capacity_provider = "FARGATE"
-    weight            = 1
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
   }
 }
 
-# Task definition for the gateway. Image URI is built from the ECR
-# repository URL (resource-resolved, account ID never appears in the
-# source) plus the var.gateway_image_tag. To deploy a new image:
-# 1) docker push <ecr_url>:<tag>
-# 2) update var.gateway_image_tag (or rely on the default 'dev')
-# 3) terraform apply  — ECS does a rolling deploy with the new task def.
-resource "aws_ecs_task_definition" "gateway" {
-  family                   = "vera-m2-gateway"
-  cpu                      = var.task_cpu
-  memory                   = var.task_memory
-  network_mode             = "awsvpc"
-  requires_compatibilities = ["FARGATE"]
+# ----------------------------------------------------------------------------
+# EC2 instance profile — wraps the task role so EC2 can assume it
+# ----------------------------------------------------------------------------
 
-  execution_role_arn = aws_iam_role.task_execution.arn
-  task_role_arn      = aws_iam_role.task.arn
-
-  container_definitions = jsonencode([
-    {
-      name      = "gateway"
-      image     = "${aws_ecr_repository.gateway.repository_url}:${var.gateway_image_tag}"
-      essential = true
-
-      portMappings = [
-        # SIP signaling
-        {
-          containerPort = 5060
-          hostPort      = 5060
-          protocol      = "udp"
-        }
-        # RTP port range is NOT declared here on purpose: ECS task def
-        # accepts only single ports, not ranges. The security group
-        # opens 10000-20000 already; the container binds whichever
-        # ports pjsua decides at runtime within that range.
-      ]
-
-      logConfiguration = {
-        logDriver = "awslogs"
-        options = {
-          "awslogs-group"         = aws_cloudwatch_log_group.gateway.name
-          "awslogs-region"        = var.region
-          "awslogs-stream-prefix" = "gateway"
-        }
-      }
-    }
-  ])
+resource "aws_iam_instance_profile" "gateway" {
+  name = "vera-m2-gateway-instance-profile"
+  role = aws_iam_role.task.name
 
   tags = {
-    Name = "vera-m2-gateway-taskdef"
+    Name = "vera-m2-gateway-instance-profile"
   }
 }
 
-# Service — 1 task always running, in our public subnets, with the
-# gateway SG. Public IPs are assigned automatically (no NLB yet —
-# Connect will reach the task directly via its public IP once we
-# wire the External Voice Transfer Connector).
-resource "aws_ecs_service" "gateway" {
-  name            = "vera-m2-gateway"
-  cluster         = aws_ecs_cluster.main.id
-  task_definition = aws_ecs_task_definition.gateway.arn
-  desired_count   = 1
-  launch_type     = "FARGATE"
+# ----------------------------------------------------------------------------
+# Gateway EC2 instance — Docker with host networking for SIP/RTP
+# ----------------------------------------------------------------------------
+# user_data installs Docker, logs into ECR, pulls the gateway image, and
+# runs it with --network host (so pjsua can bind the full UDP range
+# 10000-20000) and --log-driver=awslogs (so container stdout flows to
+# CloudWatch — same log group M2.1 used).
 
-  network_configuration {
-    subnets          = aws_subnet.public[*].id
-    security_groups  = [aws_security_group.gateway.id]
-    assign_public_ip = true
+resource "aws_instance" "gateway" {
+  ami           = data.aws_ami.amazon_linux_2023.id
+  instance_type = var.instance_type
+  subnet_id     = aws_subnet.public[0].id
+
+  vpc_security_group_ids = [aws_security_group.gateway.id]
+  iam_instance_profile   = aws_iam_instance_profile.gateway.name
+
+  user_data = templatefile("${path.module}/user_data.sh.tpl", {
+    region         = var.region
+    ecr_repo_url   = aws_ecr_repository.gateway.repository_url
+    image_tag      = var.gateway_image_tag
+    log_group_name = aws_cloudwatch_log_group.gateway.name
+  })
+  user_data_replace_on_change = true
+
+  metadata_options {
+    http_tokens   = "required" # IMDSv2 only
+    http_endpoint = "enabled"
   }
 
-  deployment_minimum_healthy_percent = 100
-  deployment_maximum_percent         = 200
-
-  # Wait for steady state but don't fail terraform if it takes long
-  # (Fargate cold-start can be 30-60s).
-  wait_for_steady_state = false
+  root_block_device {
+    volume_size = 20
+    volume_type = "gp3"
+    encrypted   = true
+  }
 
   tags = {
-    Name = "vera-m2-gateway-service"
+    Name = "vera-m2-gateway"
   }
+}
 
-  # If the task definition changes outside Terraform (e.g. by a
-  # CI/CD pipeline that pushes a new image revision), don't fight
-  # over it. For now we don't have CI/CD, so leave commented.
-  # lifecycle {
-  #   ignore_changes = [task_definition]
-  # }
+# ----------------------------------------------------------------------------
+# Elastic IP — stable public endpoint for Amazon Connect outbound routes
+# ----------------------------------------------------------------------------
+# The EIP is what Connect's "Outbound routes" config will point to (Host
+# field, with Port 5060 + UDP). It survives instance reboots and persists
+# across terraform taint of the instance — that's the M2.2 invariant.
+
+resource "aws_eip" "gateway" {
+  domain = "vpc"
+
+  tags = {
+    Name = "vera-m2-gateway-eip"
+  }
+}
+
+resource "aws_eip_association" "gateway" {
+  instance_id   = aws_instance.gateway.id
+  allocation_id = aws_eip.gateway.id
 }
