@@ -1008,3 +1008,128 @@ stack rebuilds from `terraform apply` in ~2 minutes. NLB,
 production image, and Connect-side connector remain. M2 stays
 open.
 
+
+## 2026-06-18 — Phase D / M2.1: gateway image lifecycle validated on Fargate
+
+**Context.** The M2 plan above (commit `9d14983`) had the gateway
+image listed under "Verified by code-level inspection, NOT exercised
+yet" — the Dockerfile was designed but not built, and the task
+definition pointed at the nginx placeholder. M2.1's narrow scope was
+to close that gap: build the image, push it to ECR, deploy a real
+gateway task on Fargate, and confirm CloudWatch sees what the local
+test sees. Everything else in the M2 plan (NLB, Connect-side
+connector, vocalization against a real caller, piper-tts) stays open.
+
+**Exercised end-to-end against AWS.**
+- `docker build` of the multi-stage Dockerfile against pjproject 2.17
+  (pinned release, not 2.17-dev). Six iterations were needed before
+  the image was valid; each iteration found a concrete root cause and
+  a minimal fix, all recorded in the commit `infra/m2: fix Dockerfile`
+  on this branch. The final image is 611 MB on disk / 150 MB content
+  size. Reproducible from `agent/Dockerfile` + `agent/app/vera/`.
+- The image runs `agent/app/vera/bidi/gateway_stub.py` — a canary
+  module written for M2.1 that does the minimum to prove image
+  validity: import pjsua2 (loud error + sys.exit if it fails), init
+  an Endpoint with the M1-learned order (`libCreate` → `libInit` →
+  `setNullDev` → `libStart` → `transportCreate`), open UDP 5060, and
+  emit a heartbeat every 30s. It does NOT accept INVITEs, process
+  SDP, or touch Nova Sonic. That is the next milestone, not this one.
+- Local validation in Docker on WSL2: stub came up clean, pjsua2
+  imported, transport created, heartbeat loop entered, SIGTERM
+  handled cleanly on `docker stop`.
+- ECR push: image tag `dev` pushed to the M2 repository in 1m38s.
+  Verified visible in ECR with `aws ecr describe-images`.
+- Task definition refactored to reference the image by Terraform
+  resource (`"${aws_ecr_repository.gateway.repository_url}:${var.gateway_image_tag}"`)
+  instead of a hardcoded URI. The account ID never enters the source
+  tree — the placeholder variable was renamed `gateway_image_tag` and
+  the URI is built at plan time from the ECR resource. Same
+  disciplinary stance as `backend.hcl.local`: no AWS account
+  identifiers in code or commits.
+- Rolling deploy: `terraform apply` swapped the task definition from
+  revision `:2` (nginx) to `:3` (the real image). ECS drained the old
+  task and reached steady state in ~3 minutes. CloudWatch captured
+  the gateway stub logs:
+
+  ```
+13:37:39.500 INFO [stub] vera-m2-gateway stub starting
+
+13:37:39.789 INFO [stub] pjsua2 imported successfully
+
+13:37:39.799 INFO [stub] pjsua2 Endpoint started (libVersion=2.17)
+
+13:37:39.800 INFO [stub] UDP transport created on port 5060 (id=0)
+
+13:37:39.800 INFO [stub] stub ready; entering heartbeat loop
+
+13:38:09.800 INFO [stub] alive
+
+13:38:39.800 INFO [stub] alive
+
+(heartbeats continued stable for 7+ minutes until terraform destroy)
+  ```
+
+- Full lifecycle: image present in ECR → ECS pull → container start →
+  pjsua2 OK → UDP 5060 listener → CloudWatch log stream → SIGTERM at
+  destroy → clean shutdown. Each step is what M2.1 had to prove.
+
+**Findings worth recording from the six build iterations.**
+- `setuptools` is not bundled with `python:3.12-bookworm`; `distutils`
+  is gone in 3.12. The SWIG `setup.py` needs setuptools explicitly.
+- `uv sync` on the vera package requires the full source tree (not
+  only `pyproject.toml` + `uv.lock`) — hatchling validates the
+  `readme` field at build-editable time.
+- `pyaudio` ships no Linux wheels, only sdist. The `bidi-io` extra
+  on `strands-agents` pulls it as a transitive dep, so the gateway
+  image carries `portaudio19-dev` (builder) + `libportaudio2`
+  (runtime) even though the gateway does not use pyaudio for audio.
+  This is the cost of reusing the single `vera/pyproject.toml`
+  across the FastAPI agent and the gateway. Pyaudio's footprint
+  in the image is small enough not to justify a separate
+  pyproject — anotated as deferred.
+- SWIG installs the Python C extension as `_pjsua2.cpython-312-x86_64-linux-gnu.so`
+  (underscore prefix is SWIG convention). A `COPY *pjsua2*` glob in
+  the runtime stage picks up the wrapper, the extension, and the
+  egg-info metadata directory together.
+- The uv-managed venv has an isolated `sys.path` that does NOT
+  include `/usr/local/lib/python3.12/site-packages`. The C extension
+  has to land inside `/app/.venv/lib/python3.12/site-packages/` to be
+  importable by `python -m bidi.gateway_stub`. Order matters: the
+  `COPY --from=builder /app/.venv` MUST come before the
+  `COPY *pjsua2*` to the same venv path, otherwise the venv copy
+  overwrites pjsua2.
+- `_pjsua2.so` dynamically links six pjproject third-party libs
+  (`libsrtp`, `libspeex`, `libresample`, `libwebrtc`, `libgsmcodec`,
+  `libilbccodec`) that don't match the `libpj*` glob. Broadening
+  the COPY to `/usr/local/lib/*.so*` captures everything pjproject
+  installs without re-discovering the codec list every time
+  pjproject adds one.
+
+**NOT exercised in M2.1 (carries over to M2.2+).**
+- No SIP INVITE was answered. The stub binds UDP 5060 but has no
+  account and no call handler; any INVITE would get auto-404. That
+  is intentional for the canary; the production gateway handler
+  comes later.
+- No NLB. The Fargate task's public IP is ephemeral, so the current
+  setup cannot be addressed by Connect (which needs a stable
+  endpoint). NLB shape is documented in the M2 plan and remains the
+  next architectural piece.
+- No vocalization against a real SIP caller. Still blocked on quota
+  `L-2BE4D75F` plus the Connect connector creation that quota
+  unlocks.
+- No piper-tts in the gateway runtime. `espeak`-vs-piper is
+  unchanged from the M2 plan.
+
+**Cost posture.** Active session cost: ~0.05 USD (Fargate task at
+512 CPU / 1024 MB running roughly 25 minutes across two deploys,
+plus a single `docker push` data transfer). Post-destroy steady
+state: zero recurring cost — the ECR repo was deleted with
+`force_delete=true` (the `dev` image is gone with it; reproducible
+from source in ~4 minutes with a warm cache). Out-of-band S3 +
+DynamoDB for Terraform state remain at pennies/month.
+
+**Status.** M2.1 closed. The gateway image and the lifecycle around
+it now move from "Verified by inspection" to "Exercised end-to-end."
+The rest of the M2 plan above stays open exactly as written; M2.1
+narrows the surface area for the next milestone but does not
+collapse it.
