@@ -38,10 +38,10 @@ from strands.experimental.bidi.models import BidiNovaSonicModel  # noqa: E402
 
 # Reuse the existing AGUI bridge / translator from server.py so trace +
 # monitoring views work for SIP calls without any frontend change.
-from server import AGUIBridge, AGUITranslator, BFF_AGUI_URL  # noqa: E402
+from bidi.server import AGUIBridge, AGUITranslator, BFF_AGUI_URL  # noqa: E402
 
 # Local spike adapters.
-from sip_audio import SipAudioInput, SipAudioOutput, SipBridge  # noqa: E402
+from bidi.sip_audio import SipAudioInput, SipAudioOutput, SipBridge  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
