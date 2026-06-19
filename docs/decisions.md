@@ -1329,3 +1329,71 @@ What M2.3 does NOT close (M2.4+):
 - SDP from pjsua2 default may not match Connect's expected format (codec list, RTP profile, transport). Mitigation: sipp is sufficiently strict that if sipp accepts, the SDP is RFC-compliant. Connect-specific SDP quirks would need separate investigation.
 - `setNullDev()` requirement (from M1 verdict) must be preserved in the Python init sequence. The spike has it; the clean-up must not remove it.
 - The spike relies on `from server import AGUIBridge, AGUITranslator, BFF_AGUI_URL`. M2.3 must verify `server.py` on main still exports these unchanged. If `server.py` was refactored between the spike (2026-06-10) and today (2026-06-19), there may be import drift.
+
+
+## 2026-06-19 — Phase D / M2.3: production SIP gateway validated end-to-end
+
+### Status
+
+**CLOSED.** The production gateway code is in main and validated end-to-end on AWS Linux. The M1 spike has been promoted with clean-up and a structural import fix that the spike's runner conventions had masked. The gateway answers `Account.onIncomingCall` with pjsua2-default SDP and is ready to receive SIP INVITEs — only the AWS quota `L-2BE4D75F` ("External Voice Transfer Connectors per account") blocks the end-to-end test against Amazon Connect peer (24+ days without movement on the quota request).
+
+### Exercised end-to-end
+
+**Local validation:**
+- Smoke test with `tmp/spike-sip-venv` (pjsua2 2.17-dev, strands 1.42.0): `python -m bidi.gateway` arranca el endpoint, bindea UDP 5060, queda en ready loop. `setNullDev()` pattern from M1 preserved.
+- Docker build local: imagen `5f3602d8a677`, CMD apunta a `python -m bidi.gateway` (no más `gateway_stub`).
+- Container test local en WSL2: `docker run --network host` arranca, binding interno UDP 5060 verificado vía `/dev/udp` from inside container. WSL2 host networking quirk impide `ss -ulnp` desde el host pero el container está funcional.
+
+**AWS deploy validation:**
+- `terraform apply` desde state limpio (M2.2 destruido el día anterior) creó 20 recursos en 2 fases: 17 con `-target` (~38s) para inicializar ECR, después push de imagen al repo nuevo, después 3 con `terraform apply` final (~36s) para EC2 + EIP + EIP association.
+- user_data corrió en ~80 segundos desde `Apply Complete` hasta primer log en CloudWatch.
+- **CloudWatch logs confirman el gateway productivo corriendo en EC2 Linux nativo:**
+
+```
+  2026-06-19T16:06:49 INFO:vera-gateway:Vera SIP gateway starting on UDP :5060
+  2026-06-19T16:06:49 INFO:vera-gateway:industries: ['banking', 'salud'] | default: banking
+  2026-06-19T16:06:49 INFO:vera-gateway:pjsua2 endpoint up (null audio device — host has 0 sound devs, headless OK)
+  2026-06-19T16:06:49 INFO:vera-gateway:ready. Place a call to sip:<any-user>@<host>:5060
+```
+
+  Sin "spike" en ningún log. Production-shape naming end-to-end.
+
+- Invariante M2.2 preserved: segundo `terraform apply` da `No changes. Your infrastructure matches the configuration.` EIP estable.
+
+- Session cost: ~$0.01 desde apply a destroy.
+
+### Findings
+
+**1. Spike code had a latent import bug masked by the runner's cwd convention.** The spike's `dev-spike-sip.sh` did `cd $SPIKE_DIR && python sip_spike.py`, which automatically added `agent/app/vera/bidi/` to `sys.path` (cwd default). `from server import` and `from sip_audio import` resolved because both modules lived in the cwd. The spike never imported gateway as a module — it was always invoked as a script. The Dockerfile uses `python -m bidi.gateway` which doesn't have that cwd-magic, so the imports needed to be fully qualified as `from bidi.server import` and `from bidi.sip_audio import`. Fixed in commit `2fcc801`. Lesson: code that works under a specific runner's cwd is fragile when promoted to other invocation patterns.
+
+**2. ECHO_MODE was scaffolding, not feature.** The spike had an `ECHO_MODE` flag (`VERA_SIP_ECHO=1`) that short-circuited audio in→out without Nova Sonic. Was useful for M1.2a (Pearson 0.96 echo loopback validation) but not for production. Removed in 5 places (flag declaration + comment + if/else branch + `_echo_loop` method + main_async log line) for a cleaner production module.
+
+**3. Smoke test in venv beats Docker rebuild for early validation.** The smoke test using `tmp/spike-sip-venv` (with pjsua2 + strands already installed) caught the import bug before we paid the cost of a Docker rebuild + ECR push + EC2 deploy. Lesson: a working venv with the runtime deps is worth maintaining even after the spike that created it is "closed". The patterns from M1 keep paying.
+
+**4. WSL2 Docker host networking has limitations.** `docker run --network host` on WSL2 doesn't expose UDP ports back to the WSL2 host the same way it does on Linux native. `ss -ulnp` from WSL2 host can't see the port but `/dev/udp` from inside the container can. EC2 (Linux native) doesn't have this quirk. Lesson: local Docker validation in WSL2 is a smoke test of "code compiles + container starts", not "binding is host-reachable". The truth comes from EC2.
+
+**5. Two-phase apply still required.** Same chicken-and-egg between ECR repo creation and EC2 user_data pulling from it. Documented in M2.2, re-confirmed in M2.3. Will continue to apply for any deploy that starts from a clean state.
+
+### What M2.3 closes vs what remains
+
+What's closed:
+- `gateway_stub.py` removed. `gateway.py` is the production entrypoint.
+- pjsua2 + Strands BidiAgent + Nova Sonic + industries + AGUI all wired through `Account.onIncomingCall` callback chain.
+- Docker image built and validated in EC2 Linux native.
+- `synth_speech_wav.py` (piper backend, espeak fallback) brought to main.
+
+What's NOT closed (M2.4+):
+- **Vocalization end-to-end against Amazon Connect peer**: still blocked on AWS quota `L-2BE4D75F`. Last quota status check: `CASE_OPENED` with `DesiredValue=1` since 2026-05-27 (24+ days no movement). Coordinated with martin.ferrini's team to escalate; awaiting response.
+- **sipp end-to-end against EIP from external EC2**: deferred. The CloudWatch logs prove the container starts correctly; the next stage needs a sipp client + scenario XML to validate INVITE→200 OK→RTP flow. Practical sipp tests live in M2.4 follow-up.
+- **Multi-call concurrency**: M2.3 is single-call. The `SipBridge` in `sip_audio.py` would need extension for multi-call. Deferred.
+- **Industry routing via SIP URI param**: best-effort hook from spike preserved (`_industry_from_uri`). Real Connect-side configuration needed to validate.
+- **pyaudio bloat**: image still ~611MB on-disk / ~150MB content. Deferred refactor.
+
+### Commits in feat/m2.3-gateway
+
+Three commits before squash merge to main:
+- `3f3f27b` feat(m2.3): cherry-pick spike code as production SIP gateway
+- `2fcc801` fix(m2.3): use package-qualified imports for bidi.server and bidi.sip_audio
+- `e1e0c59` chore(m2.3): wire Dockerfile to production gateway and align naming
+
+The previous commit on main was `e5bc447` (M2.3 plan). This closes M2.3 execution.
