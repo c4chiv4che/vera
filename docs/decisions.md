@@ -1262,3 +1262,70 @@ Branch `feat/m2.2-ec2-eip` (3 commits before squash on merge to main):
 The refactor removed the ECS layer (cluster + capacity providers + task def + service + execution role) and added the EC2 layer (AMI lookup + instance profile + EC2 + EIP + EIP association + new `user_data.sh.tpl`). The task role was preserved but its trust policy moved from `ecs-tasks.amazonaws.com` to `ec2.amazonaws.com`, and its inline policy gained three new statements (logs + ECR auth + ECR pull) that replace what `aws_iam_role.task_execution` did under ECS. Variables and outputs were refactored accordingly. `terraform fmt -check` clean, `terraform validate` Success — no syntactic or semantic issues.
 
 Connector to Connect is now a one-line config change on the Amazon Connect side, awaiting only the quota approval to be exercised.
+
+
+## 2026-06-19 — Phase D / M2.3 plan: real INVITE handling + loopback validation
+
+### Status
+
+**In progress.** M2.3 brings the gateway from "canary stub that auto-404s on any SIP traffic" to "production-shape Python gateway answering SIP INVITEs with valid SDP, bridging RTP audio to a Strands BidiAgent + Nova Sonic in-process". The shape comes directly from the M1 spike (`spike/m1.2b-piper-followup`, Pearson 0.96 on echo loopback, piper-tts validated). M2.3 promotes that code to main with the clean-up the spike branch consciously deferred.
+
+### Scope of M2.3
+
+What M2.3 closes:
+- `gateway_stub.py` removed, replaced by `gateway.py` (cherry-picked `sip_spike.py` with clean-up).
+- `sip_audio.py` and `synth_speech_wav.py` (piper version) cherry-picked from the spike, no modifications.
+- `Account.onIncomingCall` exercised against a real SIP peer via sipp (the spike validated only loopback in M1.2a).
+- SDP offer/answer handshake correct for an external SIP peer (default pjsua2 behavior is the first hypothesis; iterate if sipp rejects).
+- Dockerfile CMD updated to use `gateway.py`.
+- Deploy to AWS (M2.2 infra) and verify the container responds to a real INVITE from a sipp instance on a different host.
+
+What M2.3 does NOT close (M2.4+):
+- Vocalization end-to-end against Amazon Connect peer (still blocked on AWS quota `L-2BE4D75F`).
+- Multi-call concurrency (M2.3 is single-call only — the conference bridge in `sip_audio.py` would need extension for multi-call, deferred).
+- Industry routing via SIP URI param (the spike has a best-effort hook via `_industry_from_uri`; M2.3 keeps it as-is, env-default is fine for first deploy).
+- pyaudio bloat in the image (~150MB content, ~611MB on-disk — known debt, separate refactor).
+
+### Decisions documented
+
+1. **Cherry-pick scope**: `sip_spike.py` (→ `gateway.py`), `sip_audio.py` (unchanged), and `synth_speech_wav.py` (piper version from `spike/m1.2b-piper-followup`, unchanged). NOT cherry-picking `compare_echo_wav.py` (M1.2a validation utility, role fulfilled), `SIP_SPIKE_NOTES.md` (throwaway runbook), `dev-spike-sip.sh` (experimental runner), or `docs/phase-d-m1-verdict.md` (historical spike artifact, stays in the spike branch).
+
+2. **File naming**: `gateway.py`. The filename does not need to say its transport (`sip_gateway.py`) or its product name (`vera_gateway.py`); it lives in `agent/app/vera/bidi/` which already locates it as Vera's bidi-channel SIP gateway. The docstring carries the transport detail.
+
+3. **Repo location**: `agent/app/vera/bidi/gateway.py` — direct replacement of `gateway_stub.py`. The Dockerfile at `agent/Dockerfile` already builds from this path; only its CMD changes.
+
+4. **Clean-up scope**: minimal. Remove the "throwaway / NOT to be merged" header docstring and replace with a productive one. Remove the `ECHO_MODE` env flag and its loopback test code path (was for M1.2a, already validated). Keep everything else as-is. Bigger refactors (type hints, constants extraction, async patterns review) are separate deferrable work.
+
+5. **SDP handshake strategy**: trust the pjsua2 default. The spike uses `op.statusCode = pj.PJSIP_SC_OK` + `call.answer(op)`; pjsua2 generates the SDP answer automatically from its media transport configuration. Validate this against sipp as external peer; only construct manual SDP if sipp rejects. Hypothesis: sipp acceptance implies Connect acceptance with high probability (sipp is the industry-standard SIP peer for compliance testing).
+
+6. **Loopback test peer**: sipp. CLI-first, scriptable, reproducible via committed scenario XML files. Linphone was considered (easier visual feedback) but discarded for reproducibility — sipp scenarios become part of the repo and can be re-run in CI later. First scenario: `tests/sip/invite_basic.xml`, just sends an INVITE and expects 200 OK.
+
+7. **Container CMD**: switch from `gateway_stub.py` to `gateway.py` in the Dockerfile. Done as a separate commit from the cherry-pick (one commit = "bring the code", another = "wire the container to it") for clean commit history.
+
+### Verification plan
+
+**Stage 1 — local WSL2 with sipp as external peer:**
+
+- Run `python gateway.py` in one terminal (listens on UDP 5060).
+- Run `sipp -sn uac -s test -i 127.0.0.1 -p 5070 127.0.0.1:5060` from another terminal (sipp as caller).
+- Expected: 200 OK with SDP, RTP allocation succeeds, conference bridge attaches Nova Sonic, transcription appears in `gateway.py` stdout.
+- Capture pcap with tcpdump on lo if anything is off.
+
+**Stage 2 — Docker build + local container test:**
+
+- `docker build -f agent/Dockerfile -t vera-gateway:m2.3-dev agent/`
+- `docker run --network host vera-gateway:m2.3-dev` and re-run the sipp scenario. Same expected behavior.
+
+**Stage 3 — AWS deploy:**
+
+- Push image to ECR: `vera-gateway:m2.3-dev`.
+- Update `var.gateway_image_tag` in `infra/m2/` and `terraform apply` (single pass — repo already has an image).
+- Run sipp from another EC2 in a different VPC, pointed at the EIP.
+- Expected: CloudWatch logs show INVITE received, SDP answered, bidi stream with Nova Sonic established.
+- `terraform destroy` once verified.
+
+### Known risks before starting
+
+- SDP from pjsua2 default may not match Connect's expected format (codec list, RTP profile, transport). Mitigation: sipp is sufficiently strict that if sipp accepts, the SDP is RFC-compliant. Connect-specific SDP quirks would need separate investigation.
+- `setNullDev()` requirement (from M1 verdict) must be preserved in the Python init sequence. The spike has it; the clean-up must not remove it.
+- The spike relies on `from server import AGUIBridge, AGUITranslator, BFF_AGUI_URL`. M2.3 must verify `server.py` on main still exports these unchanged. If `server.py` was refactored between the spike (2026-06-10) and today (2026-06-19), there may be import drift.
