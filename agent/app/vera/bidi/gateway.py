@@ -47,7 +47,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
 )
-log = logging.getLogger("sip-spike")
+log = logging.getLogger("vera-gateway")
 
 SIP_PORT = int(os.getenv("VERA_SIP_PORT", "5060"))
 DEFAULT_INDUSTRY = os.getenv("VERA_SIP_INDUSTRY", "banking")
@@ -205,7 +205,7 @@ def _pjsua2_worker(ep: pj.Endpoint, ready: threading.Event):
 
 
 async def main_async():
-    log.info("Vera SIP spike starting on UDP :%d", SIP_PORT)
+    log.info("Vera SIP gateway starting on UDP :%d", SIP_PORT)
     log.info("industries: %s | default: %s", available_industries(), DEFAULT_INDUSTRY)
 
     ep = pj.Endpoint()

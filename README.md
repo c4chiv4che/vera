@@ -229,8 +229,9 @@ See [Running Phase D](#running-phase-d-m22) for the deploy path.
 
 - `agent/app/vera/` — Python + Strands. Text-channel agent (Phase A,
   `main.py`), voice-channel server (Phase B, `bidi/server.py`), and the
-  Phase D canary (`bidi/gateway_stub.py`, a minimal pjsua2 stub that
-  proves the M2 image is well-formed — NOT a production gateway).
+  Phase D SIP gateway (`bidi/gateway.py`, pjsua2 + Strands BidiAgent
+  in-process, promoted from the M1 spike in M2.3 — see
+  `docs/decisions.md`).
   Three tools: `identificar_cliente`, `consultar_perfil_crediticio`,
   `evaluar_prestamo`. All read CRM data via authenticated HTTPS calls
   to API Gateway.
@@ -425,10 +426,12 @@ Operational notes:
   `awslogs` driver.
 - `terraform destroy` after each validation session (see "Cost estimate").
 
-The container today is the `gateway_stub.py` canary: imports pjsua2,
-binds UDP 5060, prints "alive" every 30s. It does NOT accept SIP
-INVITEs or talk to Nova Sonic. Production gateway lands in M2.3,
-blocked on AWS quota `L-2BE4D75F`.
+The container today runs `bidi/gateway.py` (M2.3): pjsua2 binds UDP
+5060, an `Account.onIncomingCall` handler answers INVITEs with the
+pjsua2-default SDP, and audio bridges to a Strands BidiAgent in-process.
+End-to-end vocalization against Amazon Connect peer is still blocked on
+AWS quota `L-2BE4D75F` (External Voice Transfer Connector), but the
+gateway code is production-shape and validated locally via sipp.
 
 ## Multi-industry
 
@@ -532,7 +535,7 @@ vera/
 │   ├── Dockerfile      — multi-stage build of the Phase D gateway image
 │   └── app/vera/       — Python agent
 │       ├── main.py     — text-channel agent (Phase A)
-│       └── bidi/       — voice-channel server (Phase B) + gateway_stub.py (Phase D canary)
+│       └── bidi/       — voice-channel server (Phase B) + gateway.py (Phase D SIP gateway)
 └── infra/
     ├── crm/            — Terraform for the Phase A CRM
     └── m2/             — Terraform for the Phase D telephony stack

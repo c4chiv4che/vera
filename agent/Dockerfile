@@ -84,7 +84,7 @@ ENV PATH="/app/.venv/bin:$PATH"
 # venv has an isolated sys.path that does not look at the global Python
 # site-packages by design. Verified empirically in iteration 5:
 # files at /usr/local/lib/python3.12/site-packages were on disk but
-# CMD's `python -m bidi.gateway_stub` could not import them.
+# CMD's `python -m bidi.gateway` could not import them.
 COPY --from=builder /usr/local/lib/python3.12/site-packages/*pjsua2* /app/.venv/lib/python3.12/site-packages/
 RUN ldconfig
 
@@ -92,11 +92,9 @@ RUN ldconfig
 WORKDIR /app
 COPY agent/app/vera/ ./
 
-# Stub entrypoint — NOT the spike code, see bidi/gateway_stub.py.
-# Minimal pjsua2 init that proves the image is well-formed end-to-end
-# (libs load, bindings work, process stays alive). Replaced when the
-# real production gateway lands.
-CMD ["python", "-m", "bidi.gateway_stub"]
+# Production gateway — promoted from M1 spike in M2.3.
+# See bidi/gateway.py and docs/decisions.md "2026-06-19 — Phase D / M2.3".
+CMD ["python", "-m", "bidi.gateway"]
 
 # Ports declared informatively. Actual exposure is at SG + ECS level.
 EXPOSE 5060/udp
